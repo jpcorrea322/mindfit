@@ -273,7 +273,7 @@ export default function App() {
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
           />
         )}
-        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} />}
+        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>}
       </main>
     </div>
   );
@@ -867,6 +867,7 @@ function MoodForm({ entry, moodEntries, habits, onSave, onDelete, onClose, isMob
       <ScaleInput label="Sleep Quality" value={sleep} setValue={setSleep} icon=""/>
       <div className="mb-5">
         <label className="block text-sm font-semibold text-slate-700 mb-2">Mood Tags</label>
+        <p className="text-xs text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2 mb-3">Tap a suggestion to quick-add, or type any custom tag directly in the boxes below.</p>
         <div className="mb-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
           <input value={pillSearch} onChange={e => setPillSearch(e.target.value)} placeholder="Search tags..." className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:border-violet-400 focus:outline-none mb-2"/>
           <div className="flex flex-wrap gap-1.5">
@@ -1010,23 +1011,26 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
     <div className="space-y-4">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <p className="text-xs font-medium text-slate-500 mb-3">Jump to date</p>
-        <div className="flex gap-1 overflow-x-auto pb-1">
-          {days14.map(d => {
-            const t = dailyTasks[d]?.tasks || [];
-            const allDone = t.length>0 && t.every(x=>x.status==="complete");
-            const hasPending = t.some(x=>x.status==="pending");
-            const isActive = d===viewDate;
-            const isT = d===todayISO();
-            return (
-              <button key={d} onClick={()=>setViewDate(d)}
-                className={`flex-shrink-0 flex flex-col items-center px-2 py-1.5 rounded-lg text-xs transition-all min-w-[36px] border ${isActive?"bg-blue-600 text-white border-blue-600":isT?"border-blue-300 text-blue-600 bg-blue-50":"border-transparent text-slate-500 hover:bg-slate-50"}`}>
-                <span className="text-xs opacity-70">{new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"narrow"})}</span>
-                <span className="font-semibold">{new Date(d+"T00:00:00").getDate()}</span>
-                <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${allDone?"bg-emerald-400":hasPending?"bg-amber-400":t.length>0?"bg-red-400":"bg-transparent"}`}/>
-              </button>
-            );
-          })}
+        <div className="-mx-4 px-4 overflow-x-auto">
+          <div className="flex gap-1 pb-2 min-w-max">
+            {days14.map(d => {
+              const t = dailyTasks[d]?.tasks || [];
+              const allDone = t.length>0 && t.every(x=>x.status==="complete");
+              const hasPending = t.some(x=>x.status==="pending");
+              const isActive = d===viewDate;
+              const isT = d===todayISO();
+              return (
+                <button key={d} onClick={()=>setViewDate(d)}
+                  className={`flex-shrink-0 flex flex-col items-center px-2 py-1.5 rounded-lg text-xs transition-all min-w-[44px] touch-manipulation border ${isActive?"bg-blue-600 text-white border-blue-600":isT?"border-blue-300 text-blue-600 bg-blue-50":"border-transparent text-slate-500 hover:bg-slate-50"}`}>
+                  <span className="text-xs opacity-70">{new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"narrow"})}</span>
+                  <span className="font-semibold">{new Date(d+"T00:00:00").getDate()}</span>
+                  <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${allDone?"bg-emerald-400":hasPending?"bg-amber-400":t.length>0?"bg-red-400":"bg-transparent"}`}/>
+                </button>
+              );
+            })}
+          </div>
         </div>
+        <p className="md:hidden text-xs text-slate-400 text-center mt-1">← Swipe to see more days →</p>
       </div>
       <div className="bg-white rounded-xl border border-slate-200 p-5">
         <div className="flex items-center justify-between mb-4">
@@ -1403,10 +1407,89 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
   );
 }
 
-// 
+//
+// TASK INSIGHTS
+//
+function TaskInsights({ dailyTasks, kanbanCards, goals }) {
+  const stats = (() => {
+    const allTasks = Object.entries(dailyTasks).flatMap(([date, {tasks}]) =>
+      (tasks || []).map(t => ({...t, date}))
+    );
+    const completed = allTasks.filter(t => t.status === "complete");
+    const skipped   = allTasks.filter(t => t.status === "skipped");
+    const pending   = allTasks.filter(t => t.status === "pending");
+    const completionRate = allTasks.length > 0 ? Math.round((completed.length / allTasks.length) * 100) : 0;
+
+    const byGoal = goals.map(goal => ({
+      goal: goal.title,
+      color: goal.color,
+      count: completed.filter(t => t.goalId === goal.id).length
+    }));
+
+    const kanbanDone = kanbanCards.filter(c => c.status === "done" && c.due_date);
+    let early = 0, ontime = 0, late = 0;
+    kanbanDone.forEach(card => {
+      const diff = Math.floor((new Date(card.updated_at) - new Date(card.due_date + "T00:00:00")) / 86400000);
+      if (diff < 0) early++; else if (diff === 0) ontime++; else late++;
+    });
+
+    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length } };
+  })();
+
+  if (stats.total === 0 && kanbanCards.length === 0) return null;
+
+  return (
+    <div className="space-y-4">
+      {stats.total > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h3 className="font-bold text-slate-800 mb-4">Task Completion</h3>
+          <div className="grid grid-cols-4 gap-3 mb-4">
+            <div className="text-center"><div className="text-2xl font-bold text-slate-800">{stats.total}</div><div className="text-xs text-slate-500">Total</div></div>
+            <div className="text-center"><div className="text-2xl font-bold text-emerald-600">{stats.completed}</div><div className="text-xs text-slate-500">Done</div></div>
+            <div className="text-center"><div className="text-2xl font-bold text-amber-600">{stats.pending}</div><div className="text-xs text-slate-500">Pending</div></div>
+            <div className="text-center"><div className="text-2xl font-bold text-slate-400">{stats.skipped}</div><div className="text-xs text-slate-500">Skipped</div></div>
+          </div>
+          <div className="flex justify-between text-sm mb-1"><span className="text-slate-600">Completion Rate</span><span className="font-bold text-slate-800">{stats.completionRate}%</span></div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full bg-emerald-500 rounded-full transition-all" style={{width:`${stats.completionRate}%`}}/>
+          </div>
+        </div>
+      )}
+      {stats.kanban.total > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h3 className="font-bold text-slate-800 mb-4">Kanban Card Timing</h3>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-emerald-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-emerald-600">{stats.kanban.early}</div><div className="text-xs text-slate-500">Early</div></div>
+            <div className="bg-blue-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-blue-600">{stats.kanban.ontime}</div><div className="text-xs text-slate-500">On Time</div></div>
+            <div className="bg-rose-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-rose-600">{stats.kanban.late}</div><div className="text-xs text-slate-500">Overdue</div></div>
+          </div>
+        </div>
+      )}
+      {stats.byGoal.filter(g => g.count > 0).length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h3 className="font-bold text-slate-800 mb-4">Completed Tasks by Goal</h3>
+          <div className="space-y-2">
+            {stats.byGoal.filter(g => g.count > 0).sort((a,b) => b.count-a.count).map(({goal, color, count}) => {
+              const hex = GOAL_COLORS.find(c => c.id === color)?.hex || "#666";
+              return (
+                <div key={goal} className="flex items-center gap-3">
+                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{background:hex}}/>
+                  <span className="flex-1 text-sm text-slate-700">{goal}</span>
+                  <span className="text-sm font-bold text-slate-800">{count}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+//
 // INSIGHTS TAB
-// 
-function InsightsTab({ session, isMobile }) {
+//
+function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals }) {
   const [moodEntries, setMoodEntries] = useState([]);
   const [timeRange, setTimeRange]     = useState("30");
   const uid = session?.user?.id;
@@ -1416,11 +1499,14 @@ function InsightsTab({ session, isMobile }) {
   }, []);
 
   if (moodEntries.length < 3) return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-10 text-center">
-      <Lightbulb className="text-slate-300 mx-auto mb-3" size={48}/>
-      <h3 className="text-lg font-bold text-slate-500 mb-2">Insights will appear here</h3>
-      <p className="text-slate-400 text-sm">Log at least 3 mood check-ins to start seeing patterns.</p>
-      <p className="text-slate-400 text-sm mt-1">You have {moodEntries.length} so far.</p>
+    <div className="space-y-5">
+      <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-10 text-center">
+        <Lightbulb className="text-slate-300 mx-auto mb-3" size={48}/>
+        <h3 className="text-lg font-bold text-slate-500 mb-2">Mood insights will appear here</h3>
+        <p className="text-slate-400 text-sm">Log at least 3 mood check-ins to start seeing patterns.</p>
+        <p className="text-slate-400 text-sm mt-1">You have {moodEntries.length} so far.</p>
+      </div>
+      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>
     </div>
   );
 
@@ -1523,6 +1609,7 @@ function InsightsTab({ session, isMobile }) {
           </div>
         </div>
       )}
+      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>
     </div>
   );
 }
