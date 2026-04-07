@@ -6,10 +6,11 @@ import { supabase } from "./supabase.js";
 const SEED_TAGS = ["work","sleep","family","stress","exercise","diet","social","health","rest","travel","focus","anxiety","tired","motivated","productive","grateful","overwhelmed","calm","lonely","connected","sick","energy","outdoors","creative","frustrated"];
 
 const MOOD_COLORS = (score) => {
-  if (score >= 7) return { bg: "bg-emerald-500", text: "text-emerald-700", light: "bg-emerald-100", border: "border-emerald-300", hex: "#10b981" };
-  if (score >= 5) return { bg: "bg-yellow-400", text: "text-yellow-700", light: "bg-yellow-100", border: "border-yellow-300", hex: "#facc15" };
-  if (score >= 3) return { bg: "bg-orange-400", text: "text-orange-700", light: "bg-orange-100", border: "border-orange-300", hex: "#fb923c" };
-  return { bg: "bg-rose-500", text: "text-rose-700", light: "bg-rose-100", border: "border-rose-300", hex: "#f43f5e" };
+  if (score === 8) return { bg: "bg-emerald-600", text: "text-emerald-800", light: "bg-emerald-100", border: "border-emerald-400", hex: "#059669" };
+  if (score >= 6) return { bg: "bg-emerald-400", text: "text-emerald-700", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399" };
+  if (score >= 4) return { bg: "bg-yellow-400",  text: "text-yellow-700",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15" };
+  if (score >= 2) return { bg: "bg-orange-400",  text: "text-orange-700",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c" };
+  return             { bg: "bg-rose-600",    text: "text-rose-800",    light: "bg-rose-100",    border: "border-rose-400",    hex: "#e11d48" };
 };
 
 const GOAL_COLORS = [
@@ -659,20 +660,19 @@ function MoodTab({ session, isMobile }) {
             const isoDate = `${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
             const entry = entryByDate[isoDate];
             const isToday = isoDate === todayStr;
-            const avgScore = entry ? Math.round((entry.mood + entry.energy + (9-entry.stress) + entry.sleep)/4) : null;
-            const colors = entry ? MOOD_COLORS(avgScore) : null;
+            const colors = entry ? MOOD_COLORS(entry.mood) : null;
             return (
               <button key={day} onClick={() => handleDayClick(isoDate)}
                 className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all relative
                   ${entry ? `${colors.bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 hover:bg-violet-50" : "hover:bg-slate-50 border border-transparent"}`}>
                 <span className={`text-sm font-semibold ${entry?"text-white":isToday?"text-violet-600":"text-slate-600"}`}>{day}</span>
-                {entry && <span className="text-xs font-bold text-white opacity-90">{avgScore}</span>}
+                {entry && <span className="text-xs font-bold text-white opacity-90 leading-none">{entry.mood}/{entry.energy}/{entry.sleep}</span>}
               </button>
             );
           })}
         </div>
         <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-slate-100">
-          {[{label:"Low (1-2)",score:1},{label:"Fair (3-4)",score:3},{label:"Good (5-6)",score:5},{label:"Great (7-8)",score:7}].map(({label,score}) => (
+          {[{label:"1",score:1},{label:"2–3",score:2},{label:"4–5",score:4},{label:"6–7",score:6},{label:"8",score:8}].map(({label,score}) => (
             <div key={label} className="flex items-center gap-1.5">
               <div className={`w-3 h-3 rounded-full ${MOOD_COLORS(score).bg}`}/>
               <span className="text-xs text-slate-500">{label}</span>
