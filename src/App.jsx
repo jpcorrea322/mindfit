@@ -251,8 +251,8 @@ export default function App() {
           <div className="flex">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button key={id} onClick={() => setTab(id)}
-                className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${tab===id?"border-blue-600 text-blue-600":"border-transparent text-slate-500 hover:text-slate-700"}`}>
-                <Icon size={15} />
+                className={`flex items-center gap-1.5 ${isMobile?"flex-1 justify-center px-2 py-3.5":"px-4 py-3"} text-sm font-medium border-b-2 transition-colors touch-manipulation ${tab===id?"border-blue-600 text-blue-600":"border-transparent text-slate-500 hover:text-slate-700"}`}>
+                <Icon size={isMobile?18:15} />
                 {!isMobile && label}
                 {isMobile && <span className="text-xs">{label}</span>}
               </button>
@@ -958,6 +958,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
   const [editingTask, setEditingTask] = useState(null);
   const [editText, setEditText] = useState("");
   const [editGoal, setEditGoal] = useState("");
+  const calendarRef = useRef(null);
 
   const tasks = dailyTasks[viewDate]?.tasks || [];
   const isToday = viewDate === todayISO();
@@ -966,7 +967,14 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
   const skipped = tasks.filter(t=>t.status==="skipped").length;
   const pending = tasks.filter(t=>t.status==="pending").length;
 
-  const days14 = Array.from({length:14}, (_,i) => { const d=new Date(); d.setDate(d.getDate()-7+i); return d.toISOString().split("T")[0]; });
+  const days14 = Array.from({length:14}, (_,i) => { const d=new Date(); d.setDate(d.getDate()-7+i); const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; });
+
+  useEffect(() => {
+    if (calendarRef.current) {
+      const todayEl = calendarRef.current.querySelector("[data-istoday='true']");
+      if (todayEl) todayEl.scrollIntoView({ behavior: "instant", block: "nearest", inline: "center" });
+    }
+  }, []);
 
   const addTask = () => {
     if (!newTaskText.trim()) return;
@@ -1011,7 +1019,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
     <div className="space-y-4">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <p className="text-xs font-medium text-slate-500 mb-3">Jump to date</p>
-        <div className="-mx-4 px-4 overflow-x-auto">
+        <div className="-mx-4 px-4 overflow-x-auto" ref={calendarRef}>
           <div className="flex gap-1 pb-2 min-w-max">
             {days14.map(d => {
               const t = dailyTasks[d]?.tasks || [];
@@ -1020,17 +1028,17 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
               const isActive = d===viewDate;
               const isT = d===todayISO();
               return (
-                <button key={d} onClick={()=>setViewDate(d)}
-                  className={`flex-shrink-0 flex flex-col items-center px-2 py-1.5 rounded-lg text-xs transition-all min-w-[44px] touch-manipulation border ${isActive?"bg-blue-600 text-white border-blue-600":isT?"border-blue-300 text-blue-600 bg-blue-50":"border-transparent text-slate-500 hover:bg-slate-50"}`}>
+                <button key={d} onClick={()=>setViewDate(d)} data-istoday={isT}
+                  className={`flex-shrink-0 flex flex-col items-center px-2 py-2 rounded-lg text-xs transition-all min-w-[48px] touch-manipulation border ${isActive?"bg-blue-600 text-white border-blue-600":isT?"border-blue-300 text-blue-600 bg-blue-50":"border-transparent text-slate-500 hover:bg-slate-50"}`}>
                   <span className="text-xs opacity-70">{new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"narrow"})}</span>
-                  <span className="font-semibold">{new Date(d+"T00:00:00").getDate()}</span>
+                  <span className="font-semibold text-sm">{new Date(d+"T00:00:00").getDate()}</span>
                   <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${allDone?"bg-emerald-400":hasPending?"bg-amber-400":t.length>0?"bg-red-400":"bg-transparent"}`}/>
                 </button>
               );
             })}
           </div>
         </div>
-        <p className="md:hidden text-xs text-slate-400 text-center mt-1">← Swipe to see more days →</p>
+        <p className="md:hidden text-xs text-slate-400 text-center mt-1">← Swipe to navigate →</p>
       </div>
       <div className="bg-white rounded-xl border border-slate-200 p-5">
         <div className="flex items-center justify-between mb-4">
@@ -1050,7 +1058,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
             const gc = goalColor(t.goalId);
             const g  = goals.find(g=>g.id===t.goalId);
             return (
-              <div key={t.id} className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border transition-all ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
+              <div key={t.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-all ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
                 {editingTask === t.id ? (
                   // EDIT MODE
                   <>
@@ -1092,27 +1100,27 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
                   // VIEW MODE
                   <>
                     <button onClick={()=>setStatus(t.id,t.status==="complete"?"pending":"complete")}
-                      className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 border transition-all ${t.status==="complete"?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
-                      <Check size={12}/>
+                      className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${t.status==="complete"?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
+                      <Check size={isMobile?15:12}/>
                     </button>
                     <button onClick={()=>setStatus(t.id,t.status==="skipped"?"pending":"skipped")}
-                      className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 border transition-all ${t.status==="skipped"?"bg-slate-400 border-slate-400 text-white":"border-slate-300 text-slate-300 hover:border-slate-400 hover:text-slate-500"}`}>
-                      <X size={12}/>
+                      className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${t.status==="skipped"?"bg-slate-400 border-slate-400 text-white":"border-slate-300 text-slate-300 hover:border-slate-400 hover:text-slate-500"}`}>
+                      <X size={isMobile?15:12}/>
                     </button>
                     <span className={`flex-1 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
                     {gc && g && <span className="text-xs px-2 py-0.5 rounded-full text-white font-medium flex-shrink-0" style={{background:gc}}>{g.title}</span>}
-                    <button 
+                    <button
                       onClick={() => {
                         setEditingTask(t.id);
                         setEditText(t.text);
                         setEditGoal(t.goalId || "");
                       }}
-                      className="text-slate-300 hover:text-blue-600 flex-shrink-0"
+                      className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 flex-shrink-0 touch-manipulation`}
                       title="Edit task"
                     >
-                      <Edit2 size={12}/>
+                      <Edit2 size={14}/>
                     </button>
-                    <button onClick={()=>deleteTask(t.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete task"><Trash2 size={13}/></button>
+                    <button onClick={()=>deleteTask(t.id)} className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 flex-shrink-0 touch-manipulation`} title="Delete task"><Trash2 size={14}/></button>
                   </>
                 )}
               </div>
@@ -1262,32 +1270,32 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
                           <div className="flex items-start justify-between gap-1 mb-2">
                             <span className="text-sm font-medium text-slate-800 leading-tight flex-1">{card.title}</span>
                             <div className="flex gap-0.5 flex-shrink-0">
-                              <button 
+                              <button
                                 onClick={() => {
                                   setEditingCard(card.id);
                                   setEditCardTitle(card.title);
                                   setEditCardGoal(card.goal_id || "");
                                   setEditCardDue(card.due_date || "");
                                 }}
-                                className="text-slate-300 hover:text-blue-600 p-0.5"
+                                className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 touch-manipulation`}
                                 title="Edit card"
                               >
-                                <Edit2 size={12}/>
+                                <Edit2 size={14}/>
                               </button>
-                              <button 
-                                onClick={()=>deleteKanbanCard(card.id)} 
-                                className="text-slate-300 hover:text-red-400 p-0.5"
+                              <button
+                                onClick={()=>deleteKanbanCard(card.id)}
+                                className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 touch-manipulation`}
                                 title="Delete card"
                               >
-                                <Trash2 size={12}/>
+                                <Trash2 size={14}/>
                               </button>
                             </div>
                           </div>
                           {gc && g && <div className="mb-2"><span className="text-xs px-2 py-0.5 rounded-full text-white font-medium" style={{background:gc}}>{g.title}</span></div>}
                           {dueBadge(card)}
                           <div className="flex gap-1 mt-2">
-                            {prevStatus && <button onClick={()=>updateKanbanCard(card.id,{status:prevStatus})} className="flex-1 py-1 text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500">← Back</button>}
-                            {nextStatus && <button onClick={()=>updateKanbanCard(card.id,{status:nextStatus})} className="flex-1 py-1 text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium">Move →</button>}
+                            {prevStatus && <button onClick={()=>updateKanbanCard(card.id,{status:prevStatus})} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
+                            {nextStatus && <button onClick={()=>updateKanbanCard(card.id,{status:nextStatus})} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
                           </div>
                         </>
                       )}
@@ -1411,50 +1419,122 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
 // TASK INSIGHTS
 //
 function TaskInsights({ dailyTasks, kanbanCards, goals }) {
+  const [timeRange, setTimeRange] = useState("all");
+
   const stats = (() => {
-    const allTasks = Object.entries(dailyTasks).flatMap(([date, {tasks}]) =>
-      (tasks || []).map(t => ({...t, date}))
-    );
+    const cutoff = timeRange === "all" ? null : (() => { const d=new Date(); d.setDate(d.getDate()-parseInt(timeRange)); const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; })();
+
+    const allTasks = Object.entries(dailyTasks)
+      .filter(([date]) => !cutoff || date >= cutoff)
+      .flatMap(([date, {tasks}]) => (tasks || []).map(t => ({...t, date})));
     const completed = allTasks.filter(t => t.status === "complete");
     const skipped   = allTasks.filter(t => t.status === "skipped");
     const pending   = allTasks.filter(t => t.status === "pending");
     const completionRate = allTasks.length > 0 ? Math.round((completed.length / allTasks.length) * 100) : 0;
 
+    // Streak: consecutive days (going back from today) with ≥1 completed task
+    let streak = 0;
+    const checkDate = new Date();
+    for (let i = 0; i < 365; i++) {
+      const y=checkDate.getFullYear(); const mo=String(checkDate.getMonth()+1).padStart(2,"0"); const dy=String(checkDate.getDate()).padStart(2,"0");
+      const ds = `${y}-${mo}-${dy}`;
+      const dayTasks = dailyTasks[ds]?.tasks || [];
+      if (dayTasks.some(t => t.status === "complete")) { streak++; checkDate.setDate(checkDate.getDate()-1); }
+      else if (i === 0) { checkDate.setDate(checkDate.getDate()-1); } // today hasn't been completed yet
+      else break;
+    }
+
+    // Last 7 days completion data for bar chart
+    const last7 = Array.from({length:7}, (_,i) => {
+      const d=new Date(); d.setDate(d.getDate()-(6-i));
+      const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0");
+      const ds=`${y}-${m}-${day}`;
+      const dt=dailyTasks[ds]?.tasks||[];
+      const done=dt.filter(t=>t.status==="complete").length;
+      return { label: new Date(ds+"T00:00:00").toLocaleDateString("en-US",{weekday:"short"}), done, total: dt.length, rate: dt.length > 0 ? Math.round((done/dt.length)*100) : null };
+    });
+
     const byGoal = goals.map(goal => ({
-      goal: goal.title,
-      color: goal.color,
+      goal: goal.title, color: goal.color,
       count: completed.filter(t => t.goalId === goal.id).length
     }));
 
-    const kanbanDone = kanbanCards.filter(c => c.status === "done" && c.due_date);
+    const kanbanFiltered = !cutoff ? kanbanCards : kanbanCards.filter(c => !c.updated_at || c.updated_at.slice(0,10) >= cutoff);
+    const kanbanDone = kanbanFiltered.filter(c => c.status === "done" && c.due_date);
     let early = 0, ontime = 0, late = 0;
     kanbanDone.forEach(card => {
       const diff = Math.floor((new Date(card.updated_at) - new Date(card.due_date + "T00:00:00")) / 86400000);
       if (diff < 0) early++; else if (diff === 0) ontime++; else late++;
     });
 
-    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length } };
+    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7 };
   })();
 
   if (stats.total === 0 && kanbanCards.length === 0) return null;
 
+  const maxLast7 = Math.max(...stats.last7.map(d => d.total), 1);
+
   return (
     <div className="space-y-4">
+      {/* Time range filter */}
+      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+        {[["7","7 days"],["30","30 days"],["all","All time"]].map(([val,label]) => (
+          <button key={val} onClick={()=>setTimeRange(val)} className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${timeRange===val?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>{label}</button>
+        ))}
+      </div>
+
+      {/* Streak + completion rate hero row */}
+      {stats.total > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-white rounded-xl border border-slate-200 p-4 text-center">
+            <div className="text-3xl font-bold text-amber-500">{stats.streak}</div>
+            <div className="text-xs text-slate-500 mt-0.5">Day Streak</div>
+          </div>
+          <div className="bg-white rounded-xl border border-slate-200 p-4 text-center">
+            <div className="text-3xl font-bold text-emerald-600">{stats.completionRate}%</div>
+            <div className="text-xs text-slate-500 mt-0.5">Completion Rate</div>
+          </div>
+        </div>
+      )}
+
+      {/* 7-day bar chart */}
+      <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={15} className="text-blue-500"/> Last 7 Days</h3>
+        <div className="flex items-end gap-2 h-20">
+          {stats.last7.map(({label, done, total, rate}, i) => (
+            <div key={i} className="flex-1 flex flex-col items-center gap-1">
+              <div className="w-full flex flex-col justify-end" style={{height:"56px"}}>
+                {total > 0 ? (
+                  <div className="w-full rounded-t overflow-hidden" style={{height:`${Math.max((total/maxLast7)*56, 8)}px`, background:"#e2e8f0"}}>
+                    <div className="w-full rounded-t bg-emerald-500 transition-all" style={{height:`${rate}%`}}/>
+                  </div>
+                ) : (
+                  <div className="w-full rounded-t" style={{height:"4px", background:"#f1f5f9"}}/>
+                )}
+              </div>
+              <span className="text-xs text-slate-400">{label}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-xs text-slate-400 mt-2 text-center">Green = completed, gray = total tasks</p>
+      </div>
+
+      {/* Task breakdown */}
       {stats.total > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Task Completion</h3>
+          <h3 className="font-bold text-slate-800 mb-4">Task Breakdown</h3>
           <div className="grid grid-cols-4 gap-3 mb-4">
             <div className="text-center"><div className="text-2xl font-bold text-slate-800">{stats.total}</div><div className="text-xs text-slate-500">Total</div></div>
             <div className="text-center"><div className="text-2xl font-bold text-emerald-600">{stats.completed}</div><div className="text-xs text-slate-500">Done</div></div>
             <div className="text-center"><div className="text-2xl font-bold text-amber-600">{stats.pending}</div><div className="text-xs text-slate-500">Pending</div></div>
             <div className="text-center"><div className="text-2xl font-bold text-slate-400">{stats.skipped}</div><div className="text-xs text-slate-500">Skipped</div></div>
           </div>
-          <div className="flex justify-between text-sm mb-1"><span className="text-slate-600">Completion Rate</span><span className="font-bold text-slate-800">{stats.completionRate}%</span></div>
           <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
             <div className="h-full bg-emerald-500 rounded-full transition-all" style={{width:`${stats.completionRate}%`}}/>
           </div>
         </div>
       )}
+
       {stats.kanban.total > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h3 className="font-bold text-slate-800 mb-4">Kanban Card Timing</h3>
