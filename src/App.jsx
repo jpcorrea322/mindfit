@@ -262,7 +262,7 @@ export default function App() {
       </header>
       <main className="max-w-4xl mx-auto px-4 py-6">
         {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
-        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} />}
+        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} />}
         {tab === "tasks"    && (
           <TasksTab
             isMobile={isMobile}
@@ -343,8 +343,9 @@ function WorkoutsTab({ session, isMobile }) {
   };
 
   const getProgressionData = (exerciseName) => {
-    const data = workouts.filter(w => w.exercises.some(e => e.name === exerciseName))
-      .map(w => ({ date: w.date, weight: parseInt(w.exercises.find(e => e.name === exerciseName)?.weight)||0, dateObj: parseDate(w.date) }))
+    const normTarget = normEx(exerciseName);
+    const data = workouts.filter(w => w.exercises.some(e => normEx(e.name) === normTarget))
+      .map(w => ({ date: w.date, weight: parseInt(w.exercises.find(e => normEx(e.name) === normTarget)?.weight)||0, dateObj: parseDate(w.date) }))
       .filter(i => i.weight > 0).reverse();
     return data.filter(i => {
       if (timeScale === "month") { const ago = new Date(); ago.setMonth(ago.getMonth()-1); return i.dateObj >= ago; }
@@ -353,10 +354,15 @@ function WorkoutsTab({ session, isMobile }) {
     }).map((i, idx) => ({ ...i, sessionNumber: idx+1 }));
   };
 
-  const uniqueExercises = [...new Set(workouts.flatMap(w => w.exercises.map(e => e.name)))].filter(Boolean);
+  const normEx = (name) => (name || "").trim().toLowerCase();
+  const dedupeExercises = (names) => {
+    const seen = new Set();
+    return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+  const uniqueExercises = dedupeExercises(workouts.flatMap(w => w.exercises.map(e => e.name)));
   const workoutTypes    = [...new Set(workouts.map(w => w.type))].filter(Boolean);
   const exercisesByType = {};
-  workoutTypes.forEach(t => { exercisesByType[t] = [...new Set(workouts.filter(w => w.type===t).flatMap(w => w.exercises.map(e => e.name)))].filter(Boolean); });
+  workoutTypes.forEach(t => { exercisesByType[t] = dedupeExercises(workouts.filter(w => w.type===t).flatMap(w => w.exercises.map(e => e.name))); });
 
   const WorkoutForm = ({ workout, onClose }) => {
     const isEditing = !!workout;
@@ -554,7 +560,7 @@ function WorkoutsTab({ session, isMobile }) {
 // 
 // MOOD TAB
 // 
-function MoodTab({ session, isMobile }) {
+function MoodTab({ session, isMobile, dailyTasks = {} }) {
   const [moodEntries, setMoodEntries] = useState([]);
   const [habits, setHabits]           = useState([]);
   const [showForm, setShowForm]       = useState(false);
@@ -661,12 +667,20 @@ function MoodTab({ session, isMobile }) {
             const isToday = isoDate === todayStr;
             const avgScore = entry ? Math.round((entry.mood + entry.energy + (9-entry.stress) + entry.sleep)/4) : null;
             const colors = entry ? MOOD_COLORS(avgScore) : null;
+            const dayTasks = dailyTasks[isoDate]?.tasks || [];
+            const taskDone = dayTasks.filter(t => t.status === "complete").length;
+            const taskTotal = dayTasks.length;
             return (
               <button key={day} onClick={() => handleDayClick(isoDate)}
                 className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all relative
                   ${entry ? `${colors.bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 hover:bg-violet-50" : "hover:bg-slate-50 border border-transparent"}`}>
                 <span className={`text-sm font-semibold ${entry?"text-white":isToday?"text-violet-600":"text-slate-600"}`}>{day}</span>
                 {entry && <span className="text-xs font-bold text-white opacity-90">{avgScore}</span>}
+                {taskTotal > 0 && (
+                  <span className={`text-[9px] leading-none mt-0.5 font-medium ${entry ? "text-white opacity-75" : "text-slate-400"}`}>
+                    {taskDone}/{taskTotal}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -1135,6 +1149,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
 }
 
 function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals }) {
+  const [kanbanView, setKanbanView]   = useState("board");
   const [showAddCard, setShowAddCard] = useState(false);
   const [newTitle, setNewTitle]       = useState("");
   const [newGoal, setNewGoal]         = useState("");
@@ -1144,6 +1159,23 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
   const [editCardTitle, setEditCardTitle] = useState("");
   const [editCardGoal, setEditCardGoal] = useState("");
   const [editCardDue, setEditCardDue] = useState("");
+  const [calStart, setCalStart]       = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - d.getDay()); // Sunday of current week
+    return d.toISOString().split("T")[0];
+  });
+  const [calSelectedDay, setCalSelectedDay] = useState(null);
+
+  const calDays14 = Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(calStart + "T00:00:00"); d.setDate(d.getDate() + i);
+    return d.toISOString().split("T")[0];
+  });
+  const calEnd = calDays14[13];
+  const shiftCal = (weeks) => {
+    const d = new Date(calStart + "T00:00:00"); d.setDate(d.getDate() + weeks * 7);
+    setCalStart(d.toISOString().split("T")[0]); setCalSelectedDay(null);
+  };
+  const calPeriodCards = kanbanCards.filter(c => c.due_date && c.due_date >= calStart && c.due_date <= calEnd);
+  const calDoneCount   = calPeriodCards.filter(c => c.status === "done").length;
 
   const handleAdd = async () => {
     if (!newTitle.trim()) return;
@@ -1167,12 +1199,84 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
   const dueBadge = (card) => {
     if (!card.due_date) return <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded">No due date</span>;
     const label = isoToLabel(card.due_date);
-    if (card.due_date < todayISO()) return <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue  {label}</span>;
+    if (card.status !== "done" && card.due_date < todayISO()) return <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {label}</span>;
     return <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">{label}</span>;
   };
 
   return (
     <div className="space-y-4">
+      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+        {[{id:"board",label:"Board"},{id:"calendar",label:"2-Week Calendar"}].map(({id,label}) => (
+          <button key={id} onClick={() => setKanbanView(id)}
+            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${kanbanView===id?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {kanbanView === "calendar" && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <button onClick={() => shiftCal(-2)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft size={16} className="text-slate-500"/></button>
+            <div className="text-center">
+              <p className="text-sm font-bold text-slate-800">{isoToLabel(calStart)} – {isoToLabel(calEnd)}</p>
+              <p className="text-xs text-slate-400 mt-0.5">{calPeriodCards.length} cards due · <span className="text-emerald-600 font-medium">{calDoneCount} done</span></p>
+            </div>
+            <button onClick={() => shiftCal(2)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronRight size={16} className="text-slate-500"/></button>
+          </div>
+          <div className="grid grid-cols-7 gap-0.5">
+            {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d => (
+              <div key={d} className="text-center text-xs font-semibold text-slate-400 py-1">{d}</div>
+            ))}
+            {calDays14.map(iso => {
+              const dayCards = kanbanCards.filter(c => c.due_date === iso);
+              const doneCards = dayCards.filter(c => c.status === "done");
+              const overdueCards = dayCards.filter(c => c.status !== "done" && iso < todayISO());
+              const isToday = iso === todayISO();
+              const isSelected = iso === calSelectedDay;
+              return (
+                <button key={iso} onClick={() => setCalSelectedDay(isSelected ? null : iso)}
+                  className={`aspect-square rounded-lg flex flex-col items-center justify-center text-xs transition-all border
+                    ${isSelected ? "bg-blue-600 text-white border-blue-600"
+                      : isToday ? "border-blue-300 bg-blue-50"
+                      : dayCards.length > 0 ? "border-slate-200 bg-slate-50 hover:bg-slate-100"
+                      : "border-transparent hover:bg-slate-50"}`}>
+                  <span className={`font-semibold ${isSelected?"text-white":isToday?"text-blue-600":"text-slate-600"}`}>
+                    {new Date(iso+"T00:00:00").getDate()}
+                  </span>
+                  {dayCards.length > 0 && (
+                    <span className={`text-[9px] leading-none mt-0.5 font-medium ${isSelected?"text-white":overdueCards.length>0?"text-red-500":doneCards.length===dayCards.length?"text-emerald-600":"text-blue-500"}`}>
+                      {doneCards.length}/{dayCards.length}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          {calSelectedDay && (() => {
+            const dayCards = kanbanCards.filter(c => c.due_date === calSelectedDay);
+            if (dayCards.length === 0) return <p className="text-xs text-slate-400 text-center py-2">No cards due on {isoToLabel(calSelectedDay)}</p>;
+            return (
+              <div className="space-y-1.5 border-t border-slate-100 pt-3">
+                <p className="text-xs font-semibold text-slate-500 mb-2">Cards due {isoToLabel(calSelectedDay)}</p>
+                {dayCards.map(card => {
+                  const gc = colorFor(card.goal_id);
+                  const g = goalFor(card.goal_id);
+                  return (
+                    <div key={card.id} className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-100">
+                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS[card.status]}`}>{KANBAN_LABELS[card.status]}</span>
+                      <span className="text-sm text-slate-700 flex-1">{card.title}</span>
+                      {gc && g && <span className="text-xs px-2 py-0.5 rounded-full text-white font-medium flex-shrink-0" style={{background:gc}}>{g.title}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {kanbanView === "board" && <>
       <button onClick={()=>setShowAddCard(!showAddCard)} className="w-full py-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-900 flex items-center justify-center gap-2 text-sm font-medium">
         <Plus size={16}/> Add Kanban Card
       </button>
@@ -1299,6 +1403,7 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
           );
         })}
       </div>
+      </>}
     </div>
   );
 }
