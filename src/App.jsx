@@ -343,6 +343,12 @@ function WorkoutsTab({ session, isMobile }) {
     setAnalyzing(false);
   };
 
+  const normEx = (name) => (name || "").trim().toLowerCase();
+  const dedupeExercises = (names) => {
+    const seen = new Set();
+    return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
+  };
+
   const getProgressionData = (exerciseName) => {
     const normTarget = normEx(exerciseName);
     const data = workouts.filter(w => w.exercises.some(e => normEx(e.name) === normTarget))
@@ -353,12 +359,6 @@ function WorkoutsTab({ session, isMobile }) {
       if (timeScale === "year")  { const ago = new Date(); ago.setFullYear(ago.getFullYear()-1); return i.dateObj >= ago; }
       return true;
     }).map((i, idx) => ({ ...i, sessionNumber: idx+1 }));
-  };
-
-  const normEx = (name) => (name || "").trim().toLowerCase();
-  const dedupeExercises = (names) => {
-    const seen = new Set();
-    return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
   };
   const uniqueExercises = dedupeExercises(workouts.flatMap(w => w.exercises.map(e => e.name)));
   const workoutTypes    = [...new Set(workouts.map(w => w.type))].filter(Boolean);
