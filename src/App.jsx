@@ -343,7 +343,12 @@ function WorkoutsTab({ session, isMobile }) {
     setAnalyzing(false);
   };
 
-  const normEx = (name) => (name || "").trim().toLowerCase();
+  const normEx = (name) => {
+    let n = (name || "").trim().toLowerCase();
+    // Normalize plurals: "Squats" → "squat", but "Press" stays "press" (ends in ss)
+    if (n.endsWith("s") && !n.endsWith("ss")) n = n.slice(0, -1);
+    return n;
+  };
   const dedupeExercises = (names) => {
     const seen = new Set();
     return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
@@ -517,7 +522,7 @@ function WorkoutsTab({ session, isMobile }) {
                   {w.exercises.map((ex,i) => (
                     <div key={i} className="text-xs bg-slate-50 px-2 py-1 rounded">
                       <span className="font-medium">{ex.name}</span>
-                      <span className="text-blue-600">  {ex.sets}{ex.reps}{ex.weight && ` @ ${ex.weight}lbs`}</span>
+                      <span className="text-blue-600">  {ex.sets}×{ex.reps}{ex.weight && ` @ ${ex.weight}lbs`}</span>
                     </div>
                   ))}
                 </div>
@@ -667,12 +672,20 @@ function MoodTab({ session, isMobile, dailyTasks = {} }) {
             const entry = entryByDate[isoDate];
             const isToday = isoDate === todayStr;
             const colors = entry ? MOOD_COLORS(entry.mood) : null;
+            const dayTasks = dailyTasks[isoDate]?.tasks || [];
+            const taskDone = dayTasks.filter(t => t.status === "complete").length;
+            const taskTotal = dayTasks.length;
             return (
               <button key={day} onClick={() => handleDayClick(isoDate)}
                 className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all relative
                   ${entry ? `${colors.bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 hover:bg-violet-50" : "hover:bg-slate-50 border border-transparent"}`}>
                 <span className={`text-sm font-semibold ${entry?"text-white":isToday?"text-violet-600":"text-slate-600"}`}>{day}</span>
                 {entry && <span className="text-[9px] font-bold text-white opacity-90 leading-tight">{entry.mood}/{entry.energy}/{entry.sleep}</span>}
+                {taskTotal > 0 && (
+                  <span className={`text-[9px] leading-none mt-0.5 font-medium ${entry ? "text-white opacity-60" : "text-slate-400"}`}>
+                    ✓{taskDone}/{taskTotal}
+                  </span>
+                )}
               </button>
             );
           })}
