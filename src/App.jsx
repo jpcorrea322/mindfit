@@ -343,6 +343,22 @@ function WorkoutsTab({ session, isMobile }) {
     setAnalyzing(false);
   };
 
+  const parseWeights = (weight) => {
+    if (!weight && weight !== 0) return [""];
+    return String(weight).split(",").map(v => v.trim());
+  };
+  const maxWeight = (weight) => {
+    const vals = parseWeights(weight).map(Number).filter(v => v > 0);
+    return vals.length ? Math.max(...vals) : 0;
+  };
+  const formatWeightDisplay = (weight) => {
+    if (!weight) return "";
+    const vals = parseWeights(weight).filter(Boolean);
+    if (!vals.length) return "";
+    if (vals.length === 1) return ` @ ${vals[0]}lbs`;
+    return ` @ ${vals.join("/")}lbs`;
+  };
+
   const normEx = (name) => {
     let n = (name || "").trim().toLowerCase();
     // Normalize plurals: "Squats" → "squat", but "Press" stays "press" (ends in ss)
@@ -357,7 +373,7 @@ function WorkoutsTab({ session, isMobile }) {
   const getProgressionData = (exerciseName) => {
     const normTarget = normEx(exerciseName);
     const data = workouts.filter(w => w.exercises.some(e => normEx(e.name) === normTarget))
-      .map(w => ({ date: w.date, weight: parseInt(w.exercises.find(e => normEx(e.name) === normTarget)?.weight)||0, dateObj: parseDate(w.date) }))
+      .map(w => ({ date: w.date, weight: maxWeight(w.exercises.find(e => normEx(e.name) === normTarget)?.weight), dateObj: parseDate(w.date) }))
       .filter(i => i.weight > 0).reverse();
     return data.filter(i => {
       if (timeScale === "month") { const ago = new Date(); ago.setMonth(ago.getMonth()-1); return i.dateObj >= ago; }
@@ -432,8 +448,25 @@ function WorkoutsTab({ session, isMobile }) {
                 <input placeholder="Exercise name" value={ex.name} onChange={e => { const n=[...exercises]; n[idx].name=e.target.value; setExercises(n); }} className={`${isMobile?"":"col-span-2"} px-3 py-2 border border-slate-200 rounded-lg text-sm`} />
                 <input placeholder="Sets" value={ex.sets} onChange={e => { const n=[...exercises]; n[idx].sets=e.target.value; setExercises(n); }} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
                 <input placeholder="Reps" value={ex.reps} onChange={e => { const n=[...exercises]; n[idx].reps=e.target.value; setExercises(n); }} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
-                <input placeholder="Weight (lbs)" value={ex.weight} onChange={e => { const n=[...exercises]; n[idx].weight=e.target.value; setExercises(n); }} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
-                <button onClick={() => setExercises(exercises.filter((_,i) => i!==idx))} className="text-red-500 hover:text-red-700 text-sm font-medium">Remove</button>
+                <div className={`${isMobile?"":"col-span-2"} space-y-1`}>
+                  {(ex.weight ? ex.weight.split(",") : [""]).map((w, wi, arr) => (
+                    <div key={wi} className="flex gap-1 items-center">
+                      <input
+                        placeholder={arr.length > 1 ? `Set ${wi+1} weight (lbs)` : "Weight (lbs)"}
+                        value={w.trim()}
+                        onChange={e => { const n=[...exercises]; const ws=n[idx].weight?n[idx].weight.split(","):[""];ws[wi]=e.target.value;n[idx].weight=ws.join(",");setExercises(n); }}
+                        className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
+                      />
+                      {arr.length > 1 && (
+                        <button type="button" onClick={() => { const n=[...exercises];const ws=n[idx].weight.split(",").filter((_,i)=>i!==wi);n[idx].weight=ws.join(",");setExercises(n); }} className="px-2 py-1 text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
+                      )}
+                    </div>
+                  ))}
+                  <button type="button" onClick={() => { const n=[...exercises];n[idx].weight=(n[idx].weight||"")+",";setExercises(n); }} className="text-xs text-blue-500 hover:text-blue-700 font-medium">+ add set weight</button>
+                </div>
+                <div className={`${isMobile?"":"col-span-2"} flex justify-end`}>
+                  <button onClick={() => setExercises(exercises.filter((_,i) => i!==idx))} className="text-red-500 hover:text-red-700 text-sm font-medium">Remove exercise</button>
+                </div>
               </div>
               <input placeholder="Notes (optional)" value={ex.notes} onChange={e => { const n=[...exercises]; n[idx].notes=e.target.value; setExercises(n); }} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs" />
             </div>
@@ -522,7 +555,7 @@ function WorkoutsTab({ session, isMobile }) {
                   {w.exercises.map((ex,i) => (
                     <div key={i} className="text-xs bg-slate-50 px-2 py-1 rounded">
                       <span className="font-medium">{ex.name}</span>
-                      <span className="text-blue-600">  {ex.sets}×{ex.reps}{ex.weight && ` @ ${ex.weight}lbs`}</span>
+                      <span className="text-blue-600">  {ex.sets}×{ex.reps}{formatWeightDisplay(ex.weight)}</span>
                     </div>
                   ))}
                 </div>
