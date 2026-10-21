@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { TrendingUp, Dumbbell, Plus, Brain, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History } from "lucide-react";
+import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History } from "lucide-react";
 import { supabase } from "./supabase.js";
 
 //  Constants 
@@ -279,8 +279,8 @@ export default function App() {
   const TABS = [
     { id: "tasks",    label: "Tasks",    icon: Target    },
     { id: "workouts", label: "Workouts", icon: Dumbbell  },
-    { id: "insights", label: "Insights", icon: BarChart3 },
     { id: "mood",     label: "Mood",     icon: Heart     },
+    { id: "insights", label: "Insights", icon: BarChart3 },
   ];
 
   return (
@@ -321,8 +321,8 @@ export default function App() {
           />
         )}
         {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
-        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>}
         {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} />}
+        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>}
       </main>
     </div>
   );
@@ -454,8 +454,6 @@ function WorkoutsTab({ session, isMobile }) {
   const [expandedId, setExpandedId]       = useState(null);
   const [selectedExercise, setSelectedExercise] = useState("");
   const [timeScale, setTimeScale]         = useState("all");
-  const [analyzing, setAnalyzing]         = useState(false);
-  const [aiSuggestion, setAiSuggestion]   = useState(null);
 
   const uid = session?.user?.id;
 
@@ -479,23 +477,6 @@ function WorkoutsTab({ session, isMobile }) {
   const deleteWorkout = async (id) => {
     await supabase.from("workouts").delete().eq("id", id).eq("user_id", uid);
     setWorkouts(prev => prev.filter(w => w.id !== id));
-  };
-
-  const getAISuggestion = async (type) => {
-    setAnalyzing(true);
-    try {
-      const history = workouts.filter(w => w.type === type).slice(0,10)
-        .map(w => `${w.date}: ${w.exercises.map(e => `${e.name} ${e.sets}x${e.reps} @ ${e.weight}lbs`).join(", ")}`).join("\n");
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
-          messages: [{ role: "user", content: `You're a fitness coach. Based on this ${type} workout history, suggest today's workout.\n\nRecent History:\n${history || "No previous workouts"}\n\nProvide JSON only (no markdown):\n{"exercises":[{"name":"Exercise","sets":5,"reps":5,"suggestedWeight":200,"notes":"Tip"}],"overallTips":"Advice"}` }] })
-      });
-      const data = await res.json();
-      const text = data.content.find(c => c.type === "text")?.text || "";
-      setAiSuggestion(JSON.parse(text.replace(/```json\n?|\n?```/g, "").trim()));
-    } catch { setAiSuggestion({ exercises: [], overallTips: "Unable to generate suggestions." }); }
-    setAnalyzing(false);
   };
 
   const sorted = [...workouts].sort((a,b) => (parseWorkoutDate(b.date) || 0) - (parseWorkoutDate(a.date) || 0));
@@ -525,7 +506,7 @@ function WorkoutsTab({ session, isMobile }) {
     .sort((a,b) => b.sessions - a.sessions);
   const activeExercise = selectedExercise || records[0]?.name || "";
 
-  const openNew = () => { setAiSuggestion(null); setFormWorkout({}); };
+  const openNew = () => setFormWorkout({});
 
   return (
     <div className="space-y-4">
@@ -601,7 +582,7 @@ function WorkoutsTab({ session, isMobile }) {
                                 ))}
                               </div>
                               <div className="flex justify-end mt-3">
-                                <button onClick={() => { setAiSuggestion(null); setFormWorkout(w); }} className="text-xs px-3 py-1.5 bg-white border border-slate-200 text-blue-600 rounded-lg hover:bg-blue-50 flex items-center gap-1 font-medium"><Edit2 size={12}/>Edit</button>
+                                <button onClick={() => setFormWorkout(w)} className="text-xs px-3 py-1.5 bg-white border border-slate-200 text-blue-600 rounded-lg hover:bg-blue-50 flex items-center gap-1 font-medium"><Edit2 size={12}/>Edit</button>
                               </div>
                             </div>
                           )}
@@ -670,8 +651,7 @@ function WorkoutsTab({ session, isMobile }) {
 
       {formWorkout && (
         <WorkoutForm workout={formWorkout.id ? formWorkout : null} isMobile={isMobile}
-          aiSuggestion={aiSuggestion} analyzing={analyzing} onRequestAI={getAISuggestion}
-          onSave={async (w) => { await saveWorkout(w); setAiSuggestion(null); setFormWorkout(null); }}
+          onSave={async (w) => { await saveWorkout(w); setFormWorkout(null); }}
           onDelete={async (id) => { await deleteWorkout(id); setFormWorkout(null); }}
           onClose={() => setFormWorkout(null)}/>
       )}
@@ -679,7 +659,7 @@ function WorkoutsTab({ session, isMobile }) {
   );
 }
 
-function WorkoutForm({ workout, isMobile, aiSuggestion, analyzing, onRequestAI, onSave, onDelete, onClose }) {
+function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
   const isEditing = !!workout;
   const [exercises, setExercises]   = useState(workout ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
   const [formDate, setFormDate]     = useState(workout ? workout.date : todayISO());
@@ -699,10 +679,6 @@ function WorkoutForm({ workout, isMobile, aiSuggestion, analyzing, onRequestAI, 
     await onSave({ ...(workout||{}), date: formDate, type: formType, exercises: valid });
   };
 
-  const applyAI = () => {
-    if (aiSuggestion?.exercises) setExercises(aiSuggestion.exercises.map(e => ({ name: e.name, sets: String(e.sets ?? ""), reps: String(e.reps ?? ""), weight: String(e.suggestedWeight ?? ""), notes: e.notes||"" })));
-  };
-
   const typeOptions = WORKOUT_TYPES.includes(formType) ? WORKOUT_TYPES : [...WORKOUT_TYPES, formType];
 
   return (
@@ -716,23 +692,6 @@ function WorkoutForm({ workout, isMobile, aiSuggestion, analyzing, onRequestAI, 
           </select>
         </div>
       </div>
-      {!isEditing && (
-        <>
-          <button onClick={() => onRequestAI(formType)} disabled={analyzing} className="w-full mb-4 py-2.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 flex items-center justify-center gap-2 text-sm font-medium disabled:opacity-60">
-            <Brain size={16} />{analyzing ? "Analyzing…" : `Get AI Suggestion for ${formType}`}
-          </button>
-          {aiSuggestion && (
-            <div className="mb-4 p-4 bg-violet-50 rounded-lg border border-violet-200">
-              <div className="flex justify-between items-start mb-2">
-                <span className="font-semibold text-violet-900 text-sm">AI Suggestion</span>
-                {aiSuggestion.exercises?.length > 0 && <button onClick={applyAI} className="text-xs px-2 py-1 bg-violet-600 text-white rounded hover:bg-violet-700">Apply</button>}
-              </div>
-              <p className="text-xs text-violet-700 mb-2">{aiSuggestion.overallTips}</p>
-              {aiSuggestion.exercises?.map((ex,i) => <div key={i} className="text-xs text-violet-600"><strong>{ex.name}</strong>: {ex.sets}x{ex.reps} @ {ex.suggestedWeight}lbs{ex.notes && ` — ${ex.notes}`}</div>)}
-            </div>
-          )}
-        </>
-      )}
       <div className="space-y-3">
         {exercises.map((ex, idx) => (
           <div key={idx} className="p-3 bg-slate-50 rounded-lg border border-slate-100 space-y-2">
