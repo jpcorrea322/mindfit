@@ -450,7 +450,7 @@ const getProgressionData = (workouts, exerciseName, timeScale) => {
 
 function WorkoutsTab({ session, isMobile }) {
   const [workouts, setWorkouts]           = useState([]);
-  const [formWorkout, setFormWorkout]     = useState(null); // null = closed, {} = new, workout = editing
+  const [formWorkout, setFormWorkout]     = useState(null); // null = closed, no id = new (maybe prefilled), id = editing
   const [view, setView]                   = useState("history");
   const [typeFilter, setTypeFilter]       = useState("All");
   const [visibleCount, setVisibleCount]   = useState(15);
@@ -527,7 +527,9 @@ function WorkoutsTab({ session, isMobile }) {
       </button>
 
       <Segmented value={view} onChange={setView}
-        options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp}]}/>
+        options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp},{id:"program",label:"Program",icon:Calendar}]}/>
+
+      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout}/>}
 
       {view === "history" && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
@@ -653,7 +655,7 @@ function WorkoutsTab({ session, isMobile }) {
       )}
 
       {formWorkout && (
-        <WorkoutForm workout={formWorkout.id ? formWorkout : null} isMobile={isMobile}
+        <WorkoutForm workout={formWorkout} isMobile={isMobile}
           onSave={async (w) => { await saveWorkout(w); setFormWorkout(null); }}
           onDelete={async (id) => { await deleteWorkout(id); setFormWorkout(null); }}
           onClose={() => setFormWorkout(null)}/>
@@ -662,11 +664,321 @@ function WorkoutsTab({ session, isMobile }) {
   );
 }
 
+//
+// PPL PROGRAM (12-week weekly undulating periodization)
+//
+const PPL_DAYS = [
+  {
+    id: "push", name: "Push", weekday: "Mon", dayOffset: 0, coreKey: "bench", isLower: false,
+    core: { name: "Barbell Bench Press", cue: "Control 3s descent, explosive press, retract scapula", rest: "3–4 min" },
+    secondary: [
+      { name: "Incline DB Press", cue: "Full stretch at bottom, squeeze at top", rest: "90s–2 min" },
+      { name: "Seated DB Shoulder Press", cue: "Neutral grip, controlled, full ROM", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Cable Lateral Raise", cue: "Slight lean, lead with elbow, no momentum", rest: "60s" },
+      { name: "Triceps Rope Pushdown", cue: "Full extension at bottom, squeeze", rest: "60s" },
+      { name: "Overhead Triceps Extension", cue: "Elbows tight, deep stretch overhead", rest: "60s" },
+    ],
+  },
+  {
+    id: "pull", name: "Pull", weekday: "Wed", dayOffset: 2, coreKey: "dead", isLower: true,
+    core: { name: "Conventional Deadlift", cue: "Brace hard, push floor away, hips and shoulders rise together", rest: "3–5 min" },
+    secondary: [
+      { name: "Weighted Pull-Up (or Lat Pulldown)", cue: "Full hang, chin over bar, control descent", rest: "2 min" },
+      { name: "Seated Cable Row", cue: "Chest proud, drive elbows back, don't round", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Face Pull", cue: "High cable, external rotation at end range", rest: "60s" },
+      { name: "DB Hammer Curl", cue: "Neutral grip, full extension, no swing", rest: "60s" },
+      { name: "Incline DB Curl", cue: "Supinated, deep stretch at bottom", rest: "60s" },
+    ],
+  },
+  {
+    id: "legs", name: "Legs", weekday: "Fri", dayOffset: 4, coreKey: "squat", isLower: true,
+    core: { name: "Back Squat", cue: "Brace, break parallel, drive knees out, vertical torso", rest: "3–4 min" },
+    secondary: [
+      { name: "Romanian Deadlift", cue: "Hinge deep, soft knee, neutral spine, feel the hamstring", rest: "2 min" },
+      { name: "Leg Press", cue: "Full depth, feet shoulder-width, don't lock knees", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Leg Curl (Lying or Seated)", cue: "Full ROM, hold contraction 1s at top", rest: "60s" },
+      { name: "Walking Lunge", cue: "Upright torso, knee tracks toe, controlled step", rest: "90s" },
+      { name: "Standing Calf Raise", cue: "Full ROM, 2s hold at top, slow eccentric", rest: "60s" },
+    ],
+  },
+];
+
+// The 4-week cycle repeats each month; loads rise each month
+const PPL_PHASES = [
+  { id: "vol",  label: "Volume",      rpe: "RPE 6–7", core: "3–4 × 10–12", sec: "3 × 12–15",   anc: "3 × 15–20", pct: 0.65, style: "bg-sky-50 border-sky-200 text-sky-700",       bar: "bg-sky-500",
+    desc: "High-rep accumulation. Build work capacity and connective tissue. Leave 3+ reps in the tank on every set." },
+  { id: "hype", label: "Hypertrophy", rpe: "RPE 7–8", core: "4 × 8–10",    sec: "3–4 × 10–12", anc: "3 × 12–15", pct: 0.74, style: "bg-amber-50 border-amber-200 text-amber-700", bar: "bg-amber-500",
+    desc: "Prime hypertrophy zone. Moderate load, controlled tempo, maximize time under tension. Last set AMRAP." },
+  { id: "str",  label: "Strength",    rpe: "RPE 8–9", core: "4–5 × 4–6",   sec: "3 × 8–10",    anc: "3 × 10–12", pct: 0.82, style: "bg-rose-50 border-rose-200 text-rose-700",     bar: "bg-rose-500",
+    desc: "Heavy and focused. Neural drive and motor unit recruitment, converting muscle mass to maximal strength." },
+  { id: "dl",   label: "Deload",      rpe: "RPE 4–5", core: "3 × 5",       sec: "2 × 8",       anc: "2 × 10",    pct: 0.50, style: "bg-slate-50 border-slate-200 text-slate-600",  bar: "bg-slate-400",
+    desc: "Recovery week. Cut volume by 50%, keep some weight on the bar. Connective tissue repair, CNS reset, technique work." },
+];
+const PPL_WEEKS = 12;
+const PPL_DEFAULT_RMS = { bench: 225, dead: 315, squat: 275 };
+const PPL_RM_LABELS = { bench: "Bench Press", dead: "Deadlift", squat: "Back Squat" };
+
+const PPL_TIPS = [
+  ["Weekly undulation", "Don't chase PRs every week. Volume week is intentionally easy, hypertrophy week is your bread and butter, strength week is where you test. Each phase primes the next."],
+  ["Deadlift goes first", "Deadlifts are the heaviest lift, so they open Pull day before pull-ups or rows. Reset fully between sets: 3–5 minutes."],
+  ["Tempo", "On volume and hypertrophy weeks: 3s down, 1s pause, explosive up on core lifts. Secondaries: 2s down, controlled up."],
+  ["Deload rules", "Week 4 of every month: halve the sets, keep some weight on the bar. Don't skip it to stay on a roll; that's how you stall in month 2."],
+  ["When to add weight", "The monthly +5 lb (bench) / +10 lb (deadlift, squat) assumes you hit your reps at RPE ≤ 8. If strength week felt like a 9+, hold the load next month."],
+  ["Lower back", "Deadlift (Pull) and RDL (Legs) sit on different days with rest between. If back fatigue builds, swap week-3 RDLs for leg press and leg curl."],
+  ["Rest by tier", "Core: 3–5 min. Secondary: 90s–2 min. Ancillary: 45–75s; short rest there is intentional."],
+  ["Track the right things", "Log weight, reps and RPE for core and secondary sets; weight is enough for ancillary. Strength-week numbers rising month to month means it's working."],
+];
+
+const r5 = (n) => Math.round(n / 5) * 5;
+const pplCoreLoad = (rms, day, weekIdx) => {
+  const month = Math.floor(weekIdx / 4);
+  const inc = month * (day.isLower ? 10 : 5);
+  return r5(((Number(rms[day.coreKey]) || 0) + inc) * PPL_PHASES[weekIdx % 4].pct);
+};
+// "3–4 × 10–12" → { sets: "4", reps: "10-12" }
+const parseScheme = (scheme) => {
+  const [setsPart, repsPart] = scheme.split("×").map(s => s.trim());
+  return { sets: setsPart.split("–").pop(), reps: repsPart.replace("–", "-") };
+};
+const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return toISO(x); };
+const daysBetween = (fromISO, toISO_) => Math.round((new Date(toISO_ + "T00:00:00") - new Date(fromISO + "T00:00:00")) / 86400000);
+
+function PPLProgram({ session, workouts, onLogSession }) {
+  const saved = session?.user?.user_metadata?.ppl;
+  const [settings, setSettings] = useState(saved || null);
+  const [editing, setEditing]   = useState(!saved);
+  const [draft, setDraft]       = useState(saved || { startDate: mondayOf(new Date()), rms: PPL_DEFAULT_RMS });
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [openDay, setOpenDay]   = useState(null);
+  const [guide, setGuide]       = useState(null);
+  const [saving, setSaving]     = useState(false);
+
+  const saveSettings = async () => {
+    setSaving(true);
+    const next = { startDate: draft.startDate, rms: Object.fromEntries(Object.keys(PPL_DEFAULT_RMS).map(k => [k, Number(draft.rms[k]) || 0])) };
+    // Stored on the user's profile so it follows them across devices without a new table
+    await supabase.auth.updateUser({ data: { ppl: next } });
+    setSettings(next); setEditing(false); setWeekOffset(0); setSaving(false);
+  };
+
+  if (editing || !settings) return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4">
+      <div>
+        <h2 className="font-bold text-slate-800 text-lg">PPL Hypertrophy Program</h2>
+        <p className="text-sm text-slate-500 mt-1">12 weeks of Push (Mon) · Pull (Wed) · Legs (Fri). Each month cycles Volume → Hypertrophy → Strength → Deload, and core-lift loads rise every month.</p>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-slate-600 mb-1">Start date (week 1, Monday)</label>
+        <input type="date" value={draft.startDate} onChange={e => setDraft(d => ({ ...d, startDate: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {Object.keys(PPL_DEFAULT_RMS).map(k => (
+          <div key={k}>
+            <label className="block text-xs font-medium text-slate-600 mb-1">{PPL_RM_LABELS[k]} 1RM</label>
+            <input type="number" inputMode="numeric" value={draft.rms[k]} onChange={e => setDraft(d => ({ ...d, rms: { ...d.rms, [k]: e.target.value } }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <button onClick={saveSettings} disabled={!draft.startDate || saving} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm disabled:opacity-50">{settings ? "Save" : "Start Program"}</button>
+        {settings && <button onClick={() => { setDraft(settings); setEditing(false); }} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm hover:bg-slate-200">Cancel</button>}
+      </div>
+    </div>
+  );
+
+  const today = todayISO();
+  const currentWeek = Math.floor(daysBetween(settings.startDate, today) / 7);
+  const notStarted = currentWeek < 0, finished = currentWeek >= PPL_WEEKS;
+  const baseWeek = Math.min(Math.max(currentWeek, 0), PPL_WEEKS - 1);
+  const weekIdx = Math.min(Math.max(baseWeek + weekOffset, 0), PPL_WEEKS - 1);
+  const phase = PPL_PHASES[weekIdx % 4];
+  const month = Math.floor(weekIdx / 4) + 1;
+  const weekStart = addDaysISO(settings.startDate, weekIdx * 7);
+  const weekEnd = addDaysISO(weekStart, 6);
+
+  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= weekStart && w.date <= weekEnd);
+  const lastWeightFor = (name) => {
+    const w = workouts.find(w => w.exercises.some(e => normEx(e.name) === normEx(name) && maxWeight(e.weight) > 0));
+    return w ? maxWeight(w.exercises.find(e => normEx(e.name) === normEx(name)).weight) : "";
+  };
+
+  const logSession = (day) => {
+    const tier = (lifts, scheme, weightOf) => lifts.map(l => ({ name: l.name, ...parseScheme(scheme), weight: String(weightOf(l) || ""), notes: "" }));
+    onLogSession({
+      date: today >= weekStart && today <= weekEnd ? today : addDaysISO(weekStart, day.dayOffset),
+      type: day.name,
+      exercises: [
+        ...tier([day.core], phase.core, () => pplCoreLoad(settings.rms, day, weekIdx)).map(e => ({ ...e, notes: `W${weekIdx+1} ${phase.label} · ${phase.rpe}` })),
+        ...tier(day.secondary, phase.sec, l => lastWeightFor(l.name)),
+        ...tier(day.ancillary, phase.anc, l => lastWeightFor(l.name)),
+      ],
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className={`rounded-xl border p-4 ${phase.style}`}>
+        <div className="flex items-center justify-between gap-2">
+          <button onClick={() => setWeekOffset(o => o - 1)} disabled={weekIdx === 0} className="p-2 rounded-lg hover:bg-white/60 disabled:opacity-30"><ChevronLeft size={18}/></button>
+          <div className="text-center flex-1">
+            <p className="text-xs font-semibold uppercase tracking-wide opacity-80">Month {month} · Week {weekIdx+1} of {PPL_WEEKS}</p>
+            <p className="text-xl font-bold">{phase.label} Week</p>
+            <p className="text-xs opacity-80">{phase.rpe} · {isoToLabel(weekStart)} – {isoToLabel(weekEnd)}</p>
+          </div>
+          <button onClick={() => setWeekOffset(o => o + 1)} disabled={weekIdx === PPL_WEEKS - 1} className="p-2 rounded-lg hover:bg-white/60 disabled:opacity-30"><ChevronRight size={18}/></button>
+        </div>
+        <p className="text-sm mt-2 opacity-90 text-center">{phase.desc}</p>
+        <div className="flex gap-1 mt-3">
+          {Array.from({ length: PPL_WEEKS }).map((_, i) => (
+            <button key={i} onClick={() => setWeekOffset(i - baseWeek)} title={`Week ${i+1}`}
+              className={`flex-1 h-2 rounded-full ${PPL_PHASES[i % 4].bar} ${i === weekIdx ? "ring-2 ring-offset-1 ring-slate-700" : i < currentWeek ? "opacity-90" : "opacity-30"}`}/>
+          ))}
+        </div>
+        <div className="flex items-center justify-between mt-3 text-xs">
+          <span className="opacity-80">{notStarted ? `Starts ${isoToLabel(settings.startDate)}` : finished ? "Program complete" : weekOffset !== 0 ? "" : "This week"}</span>
+          <div className="flex gap-3">
+            {weekOffset !== 0 && <button onClick={() => setWeekOffset(0)} className="font-semibold underline">Back to current</button>}
+            <button onClick={() => { setDraft(settings); setEditing(true); }} className="font-semibold flex items-center gap-1"><Settings size={12}/> 1RMs & start</button>
+          </div>
+        </div>
+      </div>
+
+      {finished && weekOffset === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+          You've finished all 12 weeks. Retest your 1RMs and set a new start date to run another block.
+        </div>
+      )}
+
+      {PPL_DAYS.map(day => {
+        const logged = loggedFor(day);
+        const open = openDay === day.id;
+        const tiers = [
+          { label: "Core", scheme: phase.core, lifts: [day.core], tag: "bg-amber-100 text-amber-800" },
+          { label: "Secondary", scheme: phase.sec, lifts: day.secondary, tag: "bg-emerald-100 text-emerald-700" },
+          { label: "Ancillary", scheme: phase.anc, lifts: day.ancillary, tag: "bg-slate-100 text-slate-600" },
+        ];
+        return (
+          <div key={day.id} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="p-4">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${workoutTypeStyle(day.name)}`}>{day.name}</span>
+                  <span className="text-xs text-slate-400">{day.weekday} · {isoToLabel(addDaysISO(weekStart, day.dayOffset))}</span>
+                </div>
+                {logged
+                  ? <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600"><Check size={13}/> Logged</span>
+                  : <button onClick={() => logSession(day)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold flex items-center gap-1"><Plus size={13}/> Log session</button>}
+              </div>
+              <div className="flex items-baseline justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">{day.core.name}</p>
+                  <p className="text-xs text-slate-500">{phase.core}</p>
+                </div>
+                <span className="text-lg font-bold text-blue-700 whitespace-nowrap">{pplCoreLoad(settings.rms, day, weekIdx)} lb</span>
+              </div>
+              <p className="text-xs text-slate-500 mt-2 truncate">{[...day.secondary, ...day.ancillary].map(l => l.name).join(" · ")}</p>
+            </div>
+            <button onClick={() => setOpenDay(open ? null : day.id)} className="w-full flex items-center justify-center gap-1 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 border-t border-slate-100">
+              {open ? "Hide" : "Show"} all lifts & cues {open ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+            </button>
+            {open && (
+              <div className="px-4 pb-4 space-y-4 border-t border-slate-100 pt-3 bg-slate-50">
+                {tiers.map(t => (
+                  <div key={t.label}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${t.tag}`}>{t.label}</span>
+                      <span className="text-xs text-slate-500">{t.scheme}</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {t.lifts.map(l => (
+                        <div key={l.name} className="flex justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-slate-700">{l.name}</p>
+                            <p className="text-xs text-slate-400 italic">{l.cue}</p>
+                          </div>
+                          <span className="text-xs text-slate-400 whitespace-nowrap">Rest {l.rest}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 divide-y divide-slate-100">
+        {[["cycle","The 4-week cycle"],["loads","12-week load table"],["tips","Training tips"]].map(([id, label]) => (
+          <div key={id}>
+            <button onClick={() => setGuide(guide === id ? null : id)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-slate-50">
+              <span className="text-sm font-semibold text-slate-700">{label}</span>
+              {guide === id ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
+            </button>
+            {guide === id && id === "cycle" && (
+              <div className="px-4 pb-4 grid grid-cols-2 gap-2">
+                {PPL_PHASES.map((p, i) => (
+                  <div key={p.id} className={`rounded-lg border p-3 ${p.style}`}>
+                    <p className="text-[10px] font-bold uppercase tracking-wide opacity-80">Week {i+1}</p>
+                    <p className="font-bold">{p.label}</p>
+                    <p className="text-xs">{p.rpe} · ~{Math.round(p.pct*100)}% 1RM</p>
+                    <p className="text-xs opacity-80">Core {p.core}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {guide === id && id === "loads" && (
+              <div className="px-4 pb-4 overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-slate-400 uppercase tracking-wide">
+                      <th className="py-1.5 pr-2 font-semibold">Week</th>
+                      {PPL_DAYS.map(d => <th key={d.id} className="py-1.5 px-1 font-semibold text-right">{PPL_RM_LABELS[d.coreKey]}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: PPL_WEEKS }).map((_, i) => {
+                      const p = PPL_PHASES[i % 4];
+                      return (
+                        <tr key={i} className={`border-t border-slate-100 ${i === weekIdx ? "bg-blue-50 font-semibold" : ""} ${p.id === "dl" ? "text-slate-400" : "text-slate-700"}`}>
+                          <td className="py-1.5 pr-2 whitespace-nowrap">W{i+1} · {p.label}</td>
+                          {PPL_DAYS.map(d => <td key={d.id} className="py-1.5 px-1 text-right">{pplCoreLoad(settings.rms, d, i)} lb</td>)}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p className="text-xs text-slate-400 mt-2">Rounded to 5 lb. Monthly +5 lb bench, +10 lb deadlift and squat. Secondary and ancillary lifts are RPE-based (aim RPE 7–8); Log session pre-fills your last weight for them.</p>
+              </div>
+            )}
+            {guide === id && id === "tips" && (
+              <div className="px-4 pb-4 space-y-3">
+                {PPL_TIPS.map(([t, b]) => (
+                  <div key={t}>
+                    <p className="text-sm font-semibold text-slate-700">{t}</p>
+                    <p className="text-sm text-slate-500">{b}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
-  const isEditing = !!workout;
-  const [exercises, setExercises]   = useState(workout ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
-  const [formDate, setFormDate]     = useState(workout ? workout.date : todayISO());
-  const [formType, setFormType]     = useState(workout ? workout.type : "Push");
+  const isEditing = !!workout?.id;
+  const [exercises, setExercises]   = useState(workout?.exercises?.length ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
+  const [formDate, setFormDate]     = useState(workout?.date || todayISO());
+  const [formType, setFormType]     = useState(workout?.type || "Push");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [errors, setErrors]         = useState([]);
 
