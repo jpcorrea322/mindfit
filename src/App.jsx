@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { TrendingUp, Dumbbell, Plus, Brain, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut } from "lucide-react";
+import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History } from "lucide-react";
 import { supabase } from "./supabase.js";
 
 //  Constants 
@@ -28,22 +28,26 @@ const KANBAN_STATUSES = ["todo", "inprogress", "done"];
 const KANBAN_LABELS   = { todo: "To Do", inprogress: "In Progress", done: "Done" };
 const KANBAN_COLORS   = { todo: "bg-gray-100 text-gray-700", inprogress: "bg-blue-100 text-blue-700", done: "bg-emerald-100 text-emerald-700" };
 
-// Fixed: Use local time instead of UTC to prevent date switching before midnight
-const todayISO = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+// Local-time ISO date (YYYY-MM-DD) so dates don't switch before midnight
+const toISO = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+const todayISO = () => toISO(new Date());
+const tomorrow = () => { const d = new Date(); d.setDate(d.getDate()+1); return toISO(d); };
+const addDaysISO = (iso, n) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate()+n); return toISO(d); };
+const isoToLong = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+const daysAgoLabel = (d) => {
+  if (!(d instanceof Date) || isNaN(d)) return "—";
+  const diff = Math.round((new Date(todayISO() + "T00:00:00") - new Date(toISO(d) + "T00:00:00")) / 86400000);
+  return diff <= 0 ? "Today" : diff === 1 ? "Yesterday" : `${diff} days ago`;
 };
 
-const tomorrow = () => {
-  const now = new Date();
-  now.setDate(now.getDate() + 1);
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+// Habit check-offs are stored in tasks_daily next to that day's tasks, as items flagged with habitId.
+const tasksOn      = (dailyTasks, iso) => (dailyTasks[iso]?.tasks || []).filter(t => !t.habitId);
+const habitsDoneOn = (dailyTasks, iso) => new Set((dailyTasks[iso]?.tasks || []).filter(t => t.habitId).map(t => t.habitId));
+const habitStreak  = (dailyTasks, habitId, fromISO) => {
+  let d = habitsDoneOn(dailyTasks, fromISO).has(habitId) ? fromISO : addDaysISO(fromISO, -1);
+  let streak = 0;
+  while (streak < 3650 && habitsDoneOn(dailyTasks, d).has(habitId)) { streak++; d = addDaysISO(d, -1); }
+  return streak;
 };
 
 const fmtDisplay = (iso) => { const [y,m,d] = iso.split("-"); return `${parseInt(m)}/${parseInt(d)}/${y}`; };
@@ -116,13 +120,14 @@ function AuthScreen() {
 export default function App() {
   const [session, setSession]   = useState(null);
   const [loading, setLoading]   = useState(true);
-  const [tab, setTab]           = useState("workouts");
+  const [tab, setTab]           = useState("tasks");
   const [isMobile, setIsMobile] = useState(false);
 
   // Shared task state
   const [dailyTasks, setDailyTasks] = useState({});
   const [kanbanCards, setKanbanCards] = useState([]);
   const [goals, setGoals] = useState([]);
+  const [habits, setHabits] = useState([]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -146,6 +151,7 @@ export default function App() {
     loadDailyTasks();
     loadKanban();
     loadGoals();
+    loadHabits();
   }, [session]);
 
   const uid = () => session?.user?.id;
@@ -157,6 +163,31 @@ export default function App() {
     const map = {};
     data.forEach(row => { map[row.date] = { tasks: row.tasks || [] }; });
     setDailyTasks(map);
+    const migrated = await migrateLegacyHabits(map);
+    if (migrated) setDailyTasks(migrated);
+  };
+
+  // Habits used to be checked off inside mood check-ins (mood_entries.completed_habits).
+  // Move any of those into tasks_daily, then clear them so they aren't copied again.
+  const migrateLegacyHabits = async (map) => {
+    const { data } = await supabase.from("mood_entries").select("id,date,completed_habits").eq("user_id", uid());
+    const legacy = (data || []).filter(e => (e.completed_habits || []).length > 0);
+    if (legacy.length === 0) return null;
+    const next = { ...map };
+    legacy.forEach(e => {
+      const items = next[e.date]?.tasks || [];
+      const have = habitsDoneOn(next, e.date);
+      const added = e.completed_habits.filter(h => !have.has(h)).map(h => ({ id: `habit-${h}`, habitId: h, status: "complete" }));
+      next[e.date] = { tasks: [...items, ...added] };
+    });
+    const dates = [...new Set(legacy.map(e => e.date))];
+    const { error } = await supabase.from("tasks_daily").upsert(
+      dates.map(date => ({ user_id: uid(), date, tasks: next[date].tasks, updated_at: new Date().toISOString() })),
+      { onConflict: "user_id,date" }
+    );
+    if (error) return null;
+    await supabase.from("mood_entries").update({ completed_habits: [] }).in("id", legacy.map(e => e.id)).eq("user_id", uid());
+    return next;
   };
 
   const saveDailyTasks = async (next) => {
@@ -219,6 +250,22 @@ export default function App() {
     setGoals(prev => prev.filter(g => g.id !== id));
   };
 
+  //  Habits 
+  const loadHabits = async () => {
+    const { data } = await supabase.from("habit_definitions").select("*").eq("user_id", uid()).order("created_at");
+    if (data) setHabits(data);
+  };
+
+  const addHabit = async (name) => {
+    const { data } = await supabase.from("habit_definitions").insert({ user_id: uid(), name }).select().single();
+    if (data) setHabits(prev => [...prev, data]);
+  };
+
+  const deleteHabit = async (id) => {
+    await supabase.from("habit_definitions").delete().eq("id", id).eq("user_id", uid());
+    setHabits(prev => prev.filter(h => h.id !== id));
+  };
+
   const signOut = () => supabase.auth.signOut();
 
   if (loading) return (
@@ -230,9 +277,9 @@ export default function App() {
   if (!session) return <AuthScreen />;
 
   const TABS = [
+    { id: "tasks",    label: "Tasks",    icon: Target    },
     { id: "workouts", label: "Workouts", icon: Dumbbell  },
     { id: "mood",     label: "Mood",     icon: Heart     },
-    { id: "tasks",    label: "Tasks",    icon: Target    },
     { id: "insights", label: "Insights", icon: BarChart3 },
   ];
 
@@ -262,8 +309,6 @@ export default function App() {
         </div>
       </header>
       <main className="max-w-4xl mx-auto px-4 py-6">
-        {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
-        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} />}
         {tab === "tasks"    && (
           <TasksTab
             isMobile={isMobile}
@@ -272,28 +317,143 @@ export default function App() {
             addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}
             goals={goals}
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
+            habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
           />
         )}
-        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>}
+        {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
+        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} />}
+        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>}
       </main>
     </div>
   );
 }
 
-// 
+//
+// SHARED UI
+//
+function Sheet({ title, onClose, closeOnBackdrop = true, children }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e) => { if (e.key === "Escape") closeRef.current(); };
+    window.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = prevOverflow; window.removeEventListener("keydown", onKey); };
+  }, []);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-slate-900/40 md:p-4" onClick={() => closeOnBackdrop && onClose()}>
+      <div className="bg-white w-full md:max-w-lg max-h-[92vh] overflow-y-auto rounded-t-2xl md:rounded-2xl shadow-xl" onClick={e => e.stopPropagation()}>
+        <div className="sticky top-0 z-10 bg-white flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <h3 className="text-lg font-bold text-slate-900">{title}</h3>
+          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100" aria-label="Close"><X size={20}/></button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function Segmented({ options, value, onChange }) {
+  return (
+    <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+      {options.map(({ id, label, icon: Icon }) => (
+        <button key={id} onClick={() => onChange(id)}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all ${value===id?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>
+          {Icon && <Icon size={15}/>}{label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+const isValidDate = (d) => d instanceof Date && !isNaN(d);
+
+// Splits an already-sorted list into consecutive month buckets for history views.
+const groupByMonth = (items, getDate) => {
+  const groups = [];
+  items.forEach(item => {
+    const d = getDate(item);
+    const key = isValidDate(d) ? `${d.getFullYear()}-${d.getMonth()}` : "unknown";
+    let g = groups[groups.length-1];
+    if (!g || g.key !== key) {
+      g = { key, label: isValidDate(d) ? d.toLocaleDateString("en-US", { month: "long", year: "numeric" }) : "Undated", items: [] };
+      groups.push(g);
+    }
+    g.items.push(item);
+  });
+  return groups;
+};
+
+//
 // WORKOUTS TAB
-// 
+//
+const WORKOUT_TYPES = ["Push","Pull","Legs","Run","Other"];
+const WORKOUT_TYPE_STYLES = {
+  Push:  "bg-blue-100 text-blue-700",
+  Pull:  "bg-violet-100 text-violet-700",
+  Legs:  "bg-amber-100 text-amber-700",
+  Run:   "bg-emerald-100 text-emerald-700",
+  Other: "bg-slate-100 text-slate-600",
+};
+const workoutTypeStyle = (type) => WORKOUT_TYPE_STYLES[type] || WORKOUT_TYPE_STYLES.Other;
+
+const parseWorkoutDate = (s) => {
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + "T00:00:00");
+  const p = s.split("/");
+  if (p.length === 2) { const m = parseInt(p[0])-1; const d = parseInt(p[1]); return new Date(m > new Date().getMonth() ? 2024 : 2025, m, d); }
+  return new Date(s);
+};
+const formatDate = (d) => isValidDate(d) ? `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` : "";
+
+const parseWeights = (weight) => {
+  if (!weight && weight !== 0) return [""];
+  return String(weight).split(",").map(v => v.trim());
+};
+const maxWeight = (weight) => {
+  const vals = parseWeights(weight).map(Number).filter(v => v > 0);
+  return vals.length ? Math.max(...vals) : 0;
+};
+const formatWeightDisplay = (weight) => {
+  if (!weight) return "";
+  const vals = parseWeights(weight).filter(Boolean);
+  if (!vals.length) return "";
+  return ` @ ${vals.join("/")}lbs`;
+};
+
+const normEx = (name) => {
+  let n = (name || "").trim().toLowerCase();
+  // Normalize plurals: "Squats" → "squat", but "Press" stays "press" (ends in ss)
+  if (n.endsWith("s") && !n.endsWith("ss")) n = n.slice(0, -1);
+  return n;
+};
+const dedupeExercises = (names) => {
+  const seen = new Set();
+  return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
+};
+
+const getProgressionData = (workouts, exerciseName, timeScale) => {
+  const normTarget = normEx(exerciseName);
+  const cutoff = new Date();
+  if (timeScale === "month") cutoff.setMonth(cutoff.getMonth()-1);
+  if (timeScale === "year")  cutoff.setFullYear(cutoff.getFullYear()-1);
+  return workouts.filter(w => w.exercises.some(e => normEx(e.name) === normTarget))
+    .map(w => ({ date: w.date, weight: maxWeight(w.exercises.find(e => normEx(e.name) === normTarget)?.weight), dateObj: parseWorkoutDate(w.date) }))
+    .filter(i => i.weight > 0 && isValidDate(i.dateObj) && (timeScale === "all" || i.dateObj >= cutoff))
+    .sort((a,b) => a.dateObj - b.dateObj)
+    .map((i, idx) => ({ ...i, sessionNumber: idx+1 }));
+};
+
 function WorkoutsTab({ session, isMobile }) {
-  const [workouts, setWorkouts]             = useState([]);
-  const [showAddForm, setShowAddForm]       = useState(false);
-  const [editingWorkout, setEditingWorkout] = useState(null);
-  const [analyzing, setAnalyzing]           = useState(false);
-  const [aiSuggestion, setAiSuggestion]     = useState(null);
-  const [selectedType, setSelectedType]     = useState("Push");
-  const [chartView, setChartView]           = useState("time");
-  const [timeScale, setTimeScale]           = useState("all");
-  const [progressionExpanded, setProgressionExpanded] = useState(true);
-  const [expandedWorkoutTypes, setExpandedWorkoutTypes] = useState({});
+  const [workouts, setWorkouts]           = useState([]);
+  const [formWorkout, setFormWorkout]     = useState(null); // null = closed, {} = new, workout = editing
+  const [view, setView]                   = useState("history");
+  const [typeFilter, setTypeFilter]       = useState("All");
+  const [visibleCount, setVisibleCount]   = useState(15);
+  const [expandedId, setExpandedId]       = useState(null);
+  const [selectedExercise, setSelectedExercise] = useState("");
+  const [timeScale, setTimeScale]         = useState("all");
 
   const uid = session?.user?.id;
 
@@ -319,323 +479,367 @@ function WorkoutsTab({ session, isMobile }) {
     setWorkouts(prev => prev.filter(w => w.id !== id));
   };
 
-  const parseDate = (s) => {
-    const p = s.split("/");
-    if (p.length === 2) { const m = parseInt(p[0])-1; const d = parseInt(p[1]); return new Date(m > new Date().getMonth() ? 2024 : 2025, m, d); }
-    return new Date(s);
-  };
-  const formatDate = (d) => d ? `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` : "";
+  const sorted = [...workouts].sort((a,b) => (parseWorkoutDate(b.date) || 0) - (parseWorkoutDate(a.date) || 0));
 
-  const getAISuggestion = async () => {
-    setAnalyzing(true);
-    try {
-      const history = workouts.filter(w => w.type === selectedType).slice(0,10)
-        .map(w => `${w.date}: ${w.exercises.map(e => `${e.name} ${e.sets}x${e.reps} @ ${e.weight}lbs`).join(", ")}`).join("\n");
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
-          messages: [{ role: "user", content: `You're a fitness coach. Based on this ${selectedType} workout history, suggest today's workout.\n\nRecent History:\n${history || "No previous workouts"}\n\nProvide JSON only (no markdown):\n{"exercises":[{"name":"Exercise","sets":5,"reps":5,"suggestedWeight":200,"notes":"Tip"}],"overallTips":"Advice"}` }] })
-      });
-      const data = await res.json();
-      const text = data.content.find(c => c.type === "text")?.text || "";
-      setAiSuggestion(JSON.parse(text.replace(/```json\n?|\n?```/g, "").trim()));
-    } catch { setAiSuggestion({ exercises: [], overallTips: "Unable to generate suggestions." }); }
-    setAnalyzing(false);
-  };
+  // Summary
+  const now = new Date();
+  const startOfWeek  = new Date(now.getFullYear(), now.getMonth(), now.getDate() - now.getDay());
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const thisWeek  = sorted.filter(w => parseWorkoutDate(w.date) >= startOfWeek).length;
+  const thisMonth = sorted.filter(w => parseWorkoutDate(w.date) >= startOfMonth).length;
+  const lastWorkout = sorted[0] ? daysAgoLabel(parseWorkoutDate(sorted[0].date)) : "—";
 
-  const parseWeights = (weight) => {
-    if (!weight && weight !== 0) return [""];
-    return String(weight).split(",").map(v => v.trim());
-  };
-  const maxWeight = (weight) => {
-    const vals = parseWeights(weight).map(Number).filter(v => v > 0);
-    return vals.length ? Math.max(...vals) : 0;
-  };
-  const formatWeightDisplay = (weight) => {
-    if (!weight) return "";
-    const vals = parseWeights(weight).filter(Boolean);
-    if (!vals.length) return "";
-    if (vals.length === 1) return ` @ ${vals[0]}lbs`;
-    return ` @ ${vals.join("/")}lbs`;
-  };
+  // History
+  const types = [...new Set(sorted.map(w => w.type).filter(Boolean))];
+  const filteredWorkouts = typeFilter === "All" ? sorted : sorted.filter(w => w.type === typeFilter);
+  const historyGroups = groupByMonth(filteredWorkouts.slice(0, visibleCount), w => parseWorkoutDate(w.date));
 
-  const normEx = (name) => {
-    let n = (name || "").trim().toLowerCase();
-    // Normalize plurals: "Squats" → "squat", but "Press" stays "press" (ends in ss)
-    if (n.endsWith("s") && !n.endsWith("ss")) n = n.slice(0, -1);
-    return n;
-  };
-  const dedupeExercises = (names) => {
-    const seen = new Set();
-    return names.filter(Boolean).filter(n => { const k = normEx(n); if (seen.has(k)) return false; seen.add(k); return true; });
-  };
-
-  const getProgressionData = (exerciseName) => {
-    const normTarget = normEx(exerciseName);
-    const data = workouts.filter(w => w.exercises.some(e => normEx(e.name) === normTarget))
-      .map(w => ({ date: w.date, weight: maxWeight(w.exercises.find(e => normEx(e.name) === normTarget)?.weight), dateObj: parseDate(w.date) }))
-      .filter(i => i.weight > 0).reverse();
-    return data.filter(i => {
-      if (timeScale === "month") { const ago = new Date(); ago.setMonth(ago.getMonth()-1); return i.dateObj >= ago; }
-      if (timeScale === "year")  { const ago = new Date(); ago.setFullYear(ago.getFullYear()-1); return i.dateObj >= ago; }
-      return true;
-    }).map((i, idx) => ({ ...i, sessionNumber: idx+1 }));
-  };
-  const uniqueExercises = dedupeExercises(workouts.flatMap(w => w.exercises.map(e => e.name)));
-  const workoutTypes    = [...new Set(workouts.map(w => w.type))].filter(Boolean);
+  // Progress
   const exercisesByType = {};
-  workoutTypes.forEach(t => { exercisesByType[t] = dedupeExercises(workouts.filter(w => w.type===t).flatMap(w => w.exercises.map(e => e.name))); });
+  types.forEach(t => { exercisesByType[t] = dedupeExercises(sorted.filter(w => w.type===t).flatMap(w => w.exercises.map(e => e.name))); });
+  const records = dedupeExercises(sorted.flatMap(w => w.exercises.map(e => e.name)))
+    .map(name => {
+      const prog = getProgressionData(workouts, name, "all");
+      return { name, sessions: prog.length, best: prog.length ? Math.max(...prog.map(p => p.weight)) : 0, last: prog[prog.length-1]?.weight || 0 };
+    })
+    .filter(r => r.sessions > 0)
+    .sort((a,b) => b.sessions - a.sessions);
+  const activeExercise = selectedExercise || records[0]?.name || "";
 
-  const WorkoutForm = ({ workout, onClose }) => {
-    const isEditing = !!workout;
-    const [exercises, setExercises]   = useState(workout ? [...workout.exercises] : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
-    const [formDate, setFormDate]     = useState(workout ? workout.date : todayISO());
-    const [formType, setFormType]     = useState(workout ? workout.type : selectedType);
-    const [confirmDelete, setConfirmDelete] = useState(false);
-    const [errors, setErrors]         = useState([]);
+  const openNew = () => setFormWorkout({});
 
-    const save = async () => {
-      const errs = [];
-      if (!formDate) errs.push("Please select a date");
-      const valid = exercises.filter(ex => ex.name && ex.sets && ex.reps);
-      if (valid.length === 0) errs.push("Add at least one exercise with name, sets, and reps");
-      if (errs.length) { setErrors(errs); return; }
-      await saveWorkout({ ...(workout||{}), date: formDate, type: formType, exercises: valid });
-      setAiSuggestion(null);
-      onClose();
-    };
-
-    const applyAI = () => {
-      if (aiSuggestion?.exercises) setExercises(aiSuggestion.exercises.map(e => ({ name: e.name, sets: e.sets.toString(), reps: e.reps.toString(), weight: e.suggestedWeight.toString(), notes: e.notes||"" })));
-    };
-
-    return (
-      <div className="bg-white rounded-xl shadow-lg p-6 mb-6 border border-slate-200">
-        <div className="flex justify-between items-center mb-4">
-          <h3 className="text-lg font-bold text-slate-900">{isEditing ? "Edit Workout" : "Log New Workout"}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20} /></button>
-        </div>
-        {errors.length > 0 && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{errors.map((e,i) => <div key={i}>{e}</div>)}</div>}
-        <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-2"} gap-4 mb-4`}>
-          <div><label className="block text-xs font-medium text-slate-600 mb-1">Date</label><input type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
-          <div><label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
-            <select value={formType} onChange={e => setFormType(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm">
-              {["Push","Pull","Legs","Run","Other"].map(t => <option key={t}>{t}</option>)}
-            </select>
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-3">
+        {[{label:"This week",value:thisWeek},{label:"This month",value:thisMonth},{label:"Last workout",value:lastWorkout}].map(({label,value}) => (
+          <div key={label} className="bg-white rounded-xl border border-slate-200 p-3 text-center">
+            <div className={`font-bold text-slate-800 ${typeof value === "number" ? "text-2xl" : "text-sm py-1.5"}`}>{value}</div>
+            <div className="text-xs text-slate-500 mt-0.5">{label}</div>
           </div>
-        </div>
-        {!isEditing && (
-          <>
-            <button onClick={getAISuggestion} disabled={analyzing} className="w-full mb-4 py-2.5 bg-violet-600 text-white rounded-lg hover:bg-violet-700 flex items-center justify-center gap-2 text-sm font-medium">
-              <Brain size={16} />{analyzing ? "Analyzing" : "Get AI Suggestion"}
-            </button>
-            {aiSuggestion && (
-              <div className="mb-4 p-4 bg-violet-50 rounded-lg border border-violet-200">
-                <div className="flex justify-between items-start mb-2">
-                  <span className="font-semibold text-violet-900 text-sm">AI Suggestion</span>
-                  <button onClick={applyAI} className="text-xs px-2 py-1 bg-violet-600 text-white rounded hover:bg-violet-700">Apply</button>
-                </div>
-                <p className="text-xs text-violet-700 mb-2">{aiSuggestion.overallTips}</p>
-                {aiSuggestion.exercises?.map((ex,i) => <div key={i} className="text-xs text-violet-600"><strong>{ex.name}</strong>: {ex.sets}x{ex.reps} @ {ex.suggestedWeight}lbs{ex.notes && `  ${ex.notes}`}</div>)}
-              </div>
-            )}
-          </>
-        )}
-        <div className="space-y-3">
-          {exercises.map((ex, idx) => (
-            <div key={idx} className="p-3 bg-slate-50 rounded-lg">
-              <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-2"} gap-2 mb-2`}>
-                <input placeholder="Exercise name" value={ex.name} onChange={e => { const n=[...exercises]; n[idx].name=e.target.value; setExercises(n); }} className={`${isMobile?"":"col-span-2"} px-3 py-2 border border-slate-200 rounded-lg text-sm`} />
-                <input placeholder="Sets" value={ex.sets} onChange={e => { const n=[...exercises]; n[idx].sets=e.target.value; setExercises(n); }} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
-                <input placeholder="Reps" value={ex.reps} onChange={e => { const n=[...exercises]; n[idx].reps=e.target.value; setExercises(n); }} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
-                <div className={`${isMobile?"":"col-span-2"} space-y-1`}>
-                  {(ex.weight ? ex.weight.split(",") : [""]).map((w, wi, arr) => (
-                    <div key={wi} className="flex gap-1 items-center">
-                      <input
-                        placeholder={arr.length > 1 ? `Set ${wi+1} weight (lbs)` : "Weight (lbs)"}
-                        value={w.trim()}
-                        onChange={e => { const n=[...exercises]; const ws=n[idx].weight?n[idx].weight.split(","):[""];ws[wi]=e.target.value;n[idx].weight=ws.join(",");setExercises(n); }}
-                        className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
-                      />
-                      {arr.length > 1 && (
-                        <button type="button" onClick={() => { const n=[...exercises];const ws=n[idx].weight.split(",").filter((_,i)=>i!==wi);n[idx].weight=ws.join(",");setExercises(n); }} className="px-2 py-1 text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
-                      )}
-                    </div>
-                  ))}
-                  <button type="button" onClick={() => { const n=[...exercises];n[idx].weight=(n[idx].weight||"")+",";setExercises(n); }} className="text-xs text-blue-500 hover:text-blue-700 font-medium">+ add set weight</button>
-                </div>
-                <div className={`${isMobile?"":"col-span-2"} flex justify-end`}>
-                  <button onClick={() => setExercises(exercises.filter((_,i) => i!==idx))} className="text-red-500 hover:text-red-700 text-sm font-medium">Remove exercise</button>
-                </div>
-              </div>
-              <input placeholder="Notes (optional)" value={ex.notes} onChange={e => { const n=[...exercises]; n[idx].notes=e.target.value; setExercises(n); }} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs" />
+        ))}
+      </div>
+
+      <button onClick={openNew} className="w-full py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 flex items-center justify-center gap-2 font-semibold shadow-sm">
+        <Plus size={20} /> Log Workout
+      </button>
+
+      <Segmented value={view} onChange={setView}
+        options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp}]}/>
+
+      {view === "history" && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          {types.length > 1 && (
+            <div className="flex gap-1.5 flex-wrap mb-4">
+              {["All", ...types].map(t => (
+                <button key={t} onClick={() => { setTypeFilter(t); setVisibleCount(15); }}
+                  className={`px-3 py-1 rounded-full text-xs font-semibold transition-all ${typeFilter===t ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                  {t}
+                </button>
+              ))}
             </div>
-          ))}
-          <button onClick={() => setExercises([...exercises, {name:"",sets:"",reps:"",weight:"",notes:""}])} className="w-full py-2.5 border-2 border-dashed border-slate-200 rounded-lg text-slate-500 hover:border-slate-400 text-sm">+ Add Exercise</button>
-          <button onClick={save} className="w-full py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm">{isEditing ? "Update Workout" : "Save Workout"}</button>
-          {isEditing && !confirmDelete && <button onClick={() => setConfirmDelete(true)} className="w-full py-2.5 bg-red-500 text-white rounded-lg hover:bg-red-600 text-sm flex items-center justify-center gap-1"><Trash2 size={14}/> Delete Workout</button>}
-          {isEditing && confirmDelete && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-              <p className="text-red-700 text-sm text-center mb-3">Delete this workout permanently?</p>
-              <div className="flex gap-2">
-                <button onClick={async () => { await deleteWorkout(workout.id); onClose(); }} className="flex-1 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold">Yes, Delete</button>
-                <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold">Cancel</button>
-              </div>
+          )}
+          {filteredWorkouts.length === 0 ? (
+            <div className="text-center py-8">
+              <Dumbbell size={32} className="text-slate-300 mx-auto mb-3"/>
+              <p className="text-slate-400 text-sm">No workouts logged yet.</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {historyGroups.map(group => (
+                <div key={group.key}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">{group.label}</p>
+                  <div className="space-y-2">
+                    {group.items.map(w => {
+                      const d = parseWorkoutDate(w.date);
+                      const open = expandedId === w.id;
+                      return (
+                        <div key={w.id} className="border border-slate-100 rounded-lg overflow-hidden">
+                          <button onClick={() => setExpandedId(open ? null : w.id)} className="w-full flex items-center gap-3 p-3 text-left hover:bg-slate-50 touch-manipulation">
+                            <div className="w-10 flex-shrink-0 text-center">
+                              <div className="text-[10px] font-semibold uppercase text-slate-400">{isValidDate(d) ? d.toLocaleDateString("en-US",{weekday:"short"}) : ""}</div>
+                              <div className="text-lg font-bold text-slate-800 leading-tight">{isValidDate(d) ? d.getDate() : "?"}</div>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${workoutTypeStyle(w.type)}`}>{w.type}</span>
+                                <span className="text-xs text-slate-400">{w.exercises.length} exercise{w.exercises.length===1?"":"s"}</span>
+                              </div>
+                              <p className="text-sm text-slate-600 truncate mt-1">{w.exercises.map(e => e.name).join(" · ")}</p>
+                            </div>
+                            {open ? <ChevronUp size={16} className="text-slate-400 flex-shrink-0"/> : <ChevronDown size={16} className="text-slate-400 flex-shrink-0"/>}
+                          </button>
+                          {open && (
+                            <div className="px-3 pb-3 pt-3 border-t border-slate-100 bg-slate-50">
+                              <div className="space-y-2">
+                                {w.exercises.map((ex,i) => (
+                                  <div key={i}>
+                                    <div className="flex items-baseline justify-between gap-3 text-sm">
+                                      <span className="font-medium text-slate-700">{ex.name}</span>
+                                      <span className="text-blue-600 text-xs whitespace-nowrap">{ex.sets}×{ex.reps}{formatWeightDisplay(ex.weight)}</span>
+                                    </div>
+                                    {ex.notes && <p className="text-xs text-slate-400">{ex.notes}</p>}
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="flex justify-end mt-3">
+                                <button onClick={() => setFormWorkout(w)} className="text-xs px-3 py-1.5 bg-white border border-slate-200 text-blue-600 rounded-lg hover:bg-blue-50 flex items-center gap-1 font-medium"><Edit2 size={12}/>Edit</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              {filteredWorkouts.length > visibleCount && (
+                <button onClick={() => setVisibleCount(c => c + 15)} className="w-full py-2 text-sm font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-50 rounded-lg">
+                  Show older workouts ({filteredWorkouts.length - visibleCount} more)
+                </button>
+              )}
             </div>
           )}
         </div>
-      </div>
-    );
-  };
+      )}
 
-  const ExerciseChart = ({ exercise }) => {
-    const prog = getProgressionData(exercise);
-    if (prog.length < 2) return (
-      <div className="border border-amber-200 rounded-lg p-4 bg-amber-50 text-sm text-amber-800">
-        <strong>{exercise}</strong>  need at least 2 sessions with weight data ({prog.length} logged).
-      </div>
-    );
-    const maxW = Math.max(...prog.map(p => p.weight));
-    const minW = Math.min(...prog.map(p => p.weight));
-    const range = maxW - minW || 1;
-    const latest = prog[prog.length-1], prev = prog[prog.length-2];
-    const change = latest.weight - prev.weight;
-    return (
-      <div className="border border-slate-200 rounded-lg p-4 bg-white">
-        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <span className="font-semibold text-slate-800">{exercise}</span>
-          <div className="flex gap-3 text-xs text-slate-500">
-            <span>Latest: <strong className="text-slate-800">{latest.weight}lbs</strong></span>
-            <span>Max: <strong className="text-slate-800">{maxW}lbs</strong></span>
-            {change !== 0 && <span className={`font-semibold ${change>0?"text-emerald-600":"text-red-500"}`}>{change>0?"":""}{Math.abs(change)}lbs</span>}
+      {view === "progress" && (
+        records.length === 0 ? (
+          <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
+            <TrendingUp size={32} className="text-slate-300 mx-auto mb-3"/>
+            <p className="text-slate-400 text-sm">Log workouts with weights to see your progress.</p>
           </div>
-        </div>
-        <div className="relative bg-slate-50 rounded border border-slate-100" style={{height:"160px"}}>
-          <div className="absolute left-0 top-0 bottom-0 w-10 flex flex-col justify-between text-xs text-slate-400 pr-1 text-right py-2">
-            <span>{maxW}</span><span>{Math.round(maxW-range*0.5)}</span><span>{minW}</span>
-          </div>
-          <div className="ml-10 mr-4 h-full relative py-2">
-            <svg className="absolute inset-0 w-full h-full" style={{overflow:"visible"}}>
-              <polyline points={prog.map((p,i) => { const x=(i/(prog.length-1))*100; const y=((maxW-p.weight)/range)*86+7; return `${x}%,${y}%`; }).join(" ")} fill="none" stroke="#3b82f6" strokeWidth="2" opacity="0.6"/>
-            </svg>
-            {prog.map((p,i) => { const x=(i/(prog.length-1))*100; const y=((maxW-p.weight)/range)*86+7; return (
-              <div key={i} className="absolute w-2.5 h-2.5 bg-blue-600 rounded-full border-2 border-white shadow" style={{left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)"}} title={`${formatDate(p.dateObj)}: ${p.weight}lbs`}/>
-            );})}
-          </div>
-        </div>
-        <div className="mt-2 flex gap-2 text-xs">
-          <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Gain</div><div className="font-bold text-emerald-600">+{maxW-prog[0].weight}lbs</div></div>
-          <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Avg</div><div className="font-bold">{Math.round(prog.reduce((s,p)=>s+p.weight,0)/prog.length)}lbs</div></div>
-          <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Sessions</div><div className="font-bold">{prog.length}</div></div>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div>
-      <div className="mb-4">
-        <button onClick={() => { setShowAddForm(!showAddForm); setEditingWorkout(null); }} className="w-full py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 flex items-center justify-center gap-2 font-semibold shadow-sm">
-          <Plus size={20} /> Log New Workout
-        </button>
-      </div>
-      {showAddForm && !editingWorkout && <WorkoutForm onClose={() => setShowAddForm(false)} />}
-      {editingWorkout && <WorkoutForm workout={editingWorkout} onClose={() => setEditingWorkout(null)} />}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-4">
-        <div className="flex items-center gap-2 mb-4"><BarChart3 size={18} className="text-blue-600"/><h2 className="font-bold text-slate-800">Recent Workouts</h2></div>
-        {workouts.length === 0 ? <p className="text-slate-400 text-sm text-center py-6">No workouts logged yet.</p> : (
-          <div className="space-y-3">
-            {workouts.slice(0,10).map(w => (
-              <div key={w.id} className="border border-slate-100 rounded-lg p-3 hover:bg-slate-50">
-                <div className="flex justify-between items-start mb-2">
-                  <div><span className="font-semibold text-slate-800">{w.type} Day</span><span className="ml-2 text-xs text-slate-400">{w.date}</span></div>
-                  <button onClick={() => { setShowAddForm(false); setEditingWorkout(w); }} className="text-xs px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100 flex items-center gap-1"><Edit2 size={12}/>Edit</button>
-                </div>
-                <div className="space-y-1">
-                  {w.exercises.map((ex,i) => (
-                    <div key={i} className="text-xs bg-slate-50 px-2 py-1 rounded">
-                      <span className="font-medium">{ex.name}</span>
-                      <span className="text-blue-600">  {ex.sets}×{ex.reps}{formatWeightDisplay(ex.weight)}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-      {uniqueExercises.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-          <div className="flex items-center justify-between p-5 cursor-pointer hover:bg-slate-50 rounded-xl" onClick={() => setProgressionExpanded(!progressionExpanded)}>
-            <div className="flex items-center gap-2"><TrendingUp size={18} className="text-emerald-600"/><h2 className="font-bold text-slate-800">Exercise Progression</h2></div>
-            {progressionExpanded ? <ChevronUp size={18} className="text-slate-400"/> : <ChevronDown size={18} className="text-slate-400"/>}
-          </div>
-          {progressionExpanded && (
-            <div className="px-5 pb-5">
-              <div className="flex gap-2 mb-4 flex-wrap">
+        ) : (
+          <>
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 space-y-3">
+              <div className="flex gap-2 flex-wrap items-center">
+                <select value={activeExercise} onChange={e => setSelectedExercise(e.target.value)} className="flex-1 min-w-[160px] px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+                  {types.map(t => {
+                    const options = exercisesByType[t].filter(name => records.some(r => r.name === name));
+                    return options.length > 0 && (
+                      <optgroup key={t} label={t}>
+                        {options.map(name => <option key={name} value={name}>{name}</option>)}
+                      </optgroup>
+                    );
+                  })}
+                </select>
                 <div className="flex gap-1 bg-slate-100 p-1 rounded-lg">
                   {["month","year","all"].map(s => <button key={s} onClick={()=>setTimeScale(s)} className={`px-3 py-1 rounded text-xs font-medium transition ${timeScale===s?"bg-emerald-600 text-white":"text-slate-600 hover:bg-slate-200"}`}>{s.charAt(0).toUpperCase()+s.slice(1)}</button>)}
                 </div>
               </div>
-              <div className="space-y-4">
-                {workoutTypes.map(type => (
-                  <div key={type} className="border border-slate-200 rounded-lg">
-                    <div className="flex items-center justify-between p-3 cursor-pointer hover:bg-slate-50 bg-blue-50 rounded-lg" onClick={() => setExpandedWorkoutTypes(p => ({...p,[type]:!p[type]}))}>
-                      <span className="font-semibold text-blue-900 text-sm">{type}  {exercisesByType[type].length} exercises</span>
-                      {expandedWorkoutTypes[type] ? <ChevronUp size={16} className="text-blue-600"/> : <ChevronDown size={16} className="text-blue-600"/>}
-                    </div>
-                    {expandedWorkoutTypes[type] && <div className="p-4 space-y-4">{exercisesByType[type].map(ex => <ExerciseChart key={ex} exercise={ex}/>)}</div>}
-                  </div>
+              <ExerciseChart exercise={activeExercise} prog={getProgressionData(workouts, activeExercise, timeScale)}/>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+              <h2 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Flame size={16} className="text-amber-500"/> Personal Bests</h2>
+              <div className="divide-y divide-slate-100">
+                <div className="flex text-[11px] font-semibold uppercase tracking-wide text-slate-400 pb-2">
+                  <span className="flex-1">Exercise</span><span className="w-16 text-right">Best</span><span className="w-16 text-right">Last</span><span className="w-12 text-right">Logs</span>
+                </div>
+                {records.map(r => (
+                  <button key={r.name} onClick={() => setSelectedExercise(r.name)}
+                    className={`w-full flex items-center text-sm py-2 text-left rounded ${r.name===activeExercise?"text-blue-700 font-semibold":"text-slate-700 hover:bg-slate-50"}`}>
+                    <span className="flex-1 truncate pr-2">{r.name}</span>
+                    <span className="w-16 text-right">{r.best}lbs</span>
+                    <span className="w-16 text-right text-slate-500">{r.last}lbs</span>
+                    <span className="w-12 text-right text-slate-400">{r.sessions}</span>
+                  </button>
                 ))}
               </div>
             </div>
-          )}
-        </div>
+          </>
+        )
+      )}
+
+      {formWorkout && (
+        <WorkoutForm workout={formWorkout.id ? formWorkout : null} isMobile={isMobile}
+          onSave={async (w) => { await saveWorkout(w); setFormWorkout(null); }}
+          onDelete={async (id) => { await deleteWorkout(id); setFormWorkout(null); }}
+          onClose={() => setFormWorkout(null)}/>
       )}
     </div>
   );
 }
 
-// 
+function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
+  const isEditing = !!workout;
+  const [exercises, setExercises]   = useState(workout ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
+  const [formDate, setFormDate]     = useState(workout ? workout.date : todayISO());
+  const [formType, setFormType]     = useState(workout ? workout.type : "Push");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [errors, setErrors]         = useState([]);
+
+  const updateEx = (idx, patch) => setExercises(prev => prev.map((ex, i) => i === idx ? { ...ex, ...patch } : ex));
+  const weightsOf = (ex) => String(ex.weight ?? "").split(",");
+
+  const save = async () => {
+    const errs = [];
+    if (!formDate) errs.push("Please select a date");
+    const valid = exercises.filter(ex => ex.name && ex.sets && ex.reps);
+    if (valid.length === 0) errs.push("Add at least one exercise with name, sets, and reps");
+    if (errs.length) { setErrors(errs); return; }
+    await onSave({ ...(workout||{}), date: formDate, type: formType, exercises: valid });
+  };
+
+  const typeOptions = WORKOUT_TYPES.includes(formType) ? WORKOUT_TYPES : [...WORKOUT_TYPES, formType];
+
+  return (
+    <Sheet title={isEditing ? "Edit Workout" : "Log Workout"} onClose={onClose} closeOnBackdrop={false}>
+      {errors.length > 0 && <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{errors.map((e,i) => <div key={i}>{e}</div>)}</div>}
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div><label className="block text-xs font-medium text-slate-600 mb-1">Date</label><input type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm" /></div>
+        <div><label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
+          <select value={formType} onChange={e => setFormType(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+            {typeOptions.map(t => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="space-y-3">
+        {exercises.map((ex, idx) => (
+          <div key={idx} className="p-3 bg-slate-50 rounded-lg border border-slate-100 space-y-2">
+            <div className="flex gap-2 items-center">
+              <input placeholder="Exercise name" value={ex.name} onChange={e => updateEx(idx, { name: e.target.value })} className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+              <button onClick={() => setExercises(exercises.filter((_,i) => i!==idx))} className="p-2 text-slate-300 hover:text-red-500" title="Remove exercise"><Trash2 size={15}/></button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input placeholder="Sets" inputMode="numeric" value={ex.sets} onChange={e => updateEx(idx, { sets: e.target.value })} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+              <input placeholder="Reps" inputMode="numeric" value={ex.reps} onChange={e => updateEx(idx, { reps: e.target.value })} className="px-3 py-2 border border-slate-200 rounded-lg text-sm" />
+            </div>
+            <div className="space-y-1">
+              {weightsOf(ex).map((w, wi, arr) => (
+                <div key={wi} className="flex gap-1 items-center">
+                  <input
+                    placeholder={arr.length > 1 ? `Set ${wi+1} weight (lbs)` : "Weight (lbs)"}
+                    inputMode="decimal"
+                    value={w.trim()}
+                    onChange={e => { const ws = weightsOf(ex); ws[wi] = e.target.value; updateEx(idx, { weight: ws.join(",") }); }}
+                    className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
+                  />
+                  {arr.length > 1 && (
+                    <button type="button" onClick={() => updateEx(idx, { weight: weightsOf(ex).filter((_,i)=>i!==wi).join(",") })} className="px-2 py-1 text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
+                  )}
+                </div>
+              ))}
+              <button type="button" onClick={() => updateEx(idx, { weight: String(ex.weight ?? "") + "," })} className="text-xs text-blue-500 hover:text-blue-700 font-medium">+ add set weight</button>
+            </div>
+            <input placeholder="Notes (optional)" value={ex.notes || ""} onChange={e => updateEx(idx, { notes: e.target.value })} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs" />
+          </div>
+        ))}
+        <button onClick={() => setExercises([...exercises, {name:"",sets:"",reps:"",weight:"",notes:""}])} className="w-full py-2.5 border-2 border-dashed border-slate-200 rounded-lg text-slate-500 hover:border-slate-400 text-sm">+ Add Exercise</button>
+        <button onClick={save} className="w-full py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm">{isEditing ? "Update Workout" : "Save Workout"}</button>
+        {isEditing && !confirmDelete && <button onClick={() => setConfirmDelete(true)} className="w-full py-2.5 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-100 text-sm font-semibold flex items-center justify-center gap-1"><Trash2 size={14}/> Delete Workout</button>}
+        {isEditing && confirmDelete && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+            <p className="text-red-700 text-sm text-center mb-3">Delete this workout permanently?</p>
+            <div className="flex gap-2">
+              <button onClick={() => onDelete(workout.id)} className="flex-1 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold">Yes, Delete</button>
+              <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold">Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </Sheet>
+  );
+}
+
+function ExerciseChart({ exercise, prog }) {
+  if (prog.length < 2) return (
+    <div className="border border-amber-200 rounded-lg p-4 bg-amber-50 text-sm text-amber-800">
+      <strong>{exercise}</strong> — need at least 2 sessions with weight data in this range ({prog.length} logged).
+    </div>
+  );
+  const maxW = Math.max(...prog.map(p => p.weight));
+  const minW = Math.min(...prog.map(p => p.weight));
+  const range = maxW - minW || 1;
+  const latest = prog[prog.length-1], prev = prog[prog.length-2];
+  const change = latest.weight - prev.weight;
+  const point = (p, i) => ({ x: (i/(prog.length-1))*100, y: ((maxW-p.weight)/range)*86+7 });
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <span className="font-semibold text-slate-800">{exercise}</span>
+        <div className="flex gap-3 text-xs text-slate-500">
+          <span>Latest: <strong className="text-slate-800">{latest.weight}lbs</strong></span>
+          {change !== 0 && <span className={`font-semibold ${change>0?"text-emerald-600":"text-red-500"}`}>{change>0?"+":"−"}{Math.abs(change)}lbs vs last</span>}
+        </div>
+      </div>
+      <div className="relative bg-slate-50 rounded border border-slate-100" style={{height:"160px"}}>
+        <div className="absolute left-0 top-0 bottom-0 w-10 flex flex-col justify-between text-xs text-slate-400 pr-1 text-right py-2">
+          <span>{maxW}</span><span>{Math.round(maxW-range*0.5)}</span><span>{minW}</span>
+        </div>
+        <div className="ml-10 mr-4 h-full relative py-2">
+          <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{overflow:"visible"}}>
+            <polyline points={prog.map((p,i) => { const {x,y} = point(p,i); return `${x},${y}`; }).join(" ")} fill="none" stroke="#3b82f6" strokeWidth="2" opacity="0.6" vectorEffect="non-scaling-stroke"/>
+          </svg>
+          {prog.map((p,i) => { const {x,y} = point(p,i); return (
+            <div key={i} className="absolute w-2.5 h-2.5 bg-blue-600 rounded-full border-2 border-white shadow" style={{left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)"}} title={`${formatDate(p.dateObj)}: ${p.weight}lbs`}/>
+          );})}
+        </div>
+      </div>
+      <div className="flex justify-between text-xs text-slate-400 mt-1 ml-10 mr-4">
+        <span>{formatDate(prog[0].dateObj)}</span><span>{formatDate(latest.dateObj)}</span>
+      </div>
+      <div className="mt-2 flex gap-2 text-xs">
+        <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Gain</div><div className="font-bold text-emerald-600">+{maxW-prog[0].weight}lbs</div></div>
+        <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Best</div><div className="font-bold">{maxW}lbs</div></div>
+        <div className="flex-1 bg-slate-50 rounded p-2 text-center"><div className="text-slate-500">Sessions</div><div className="font-bold">{prog.length}</div></div>
+      </div>
+    </div>
+  );
+}
+
+//
 // MOOD TAB
-// 
-function MoodTab({ session, isMobile, dailyTasks = {} }) {
-  const [moodEntries, setMoodEntries] = useState([]);
-  const [habits, setHabits]           = useState([]);
-  const [showForm, setShowForm]       = useState(false);
-  const [editingEntry, setEditingEntry] = useState(null);
-  const [selectedDay, setSelectedDay] = useState(null);
+//
+const MOOD_METRICS = [
+  { key: "mood",   label: "Mood",   icon: Smile    },
+  { key: "energy", label: "Energy", icon: Zap      },
+  { key: "stress", label: "Stress", icon: Activity, inverted: true },
+  { key: "sleep",  label: "Sleep",  icon: Moon     },
+];
+const metricColors = (metric, value) => MOOD_COLORS(metric.inverted ? 9 - value : value);
+const moodLabel = (score) => score>=7 ? "Great day" : score>=5 ? "Good day" : score>=3 ? "Fair day" : "Tough day";
+
+function MetricPills({ entry }) {
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1">
+      {MOOD_METRICS.filter(m => m.key !== "mood").map(m => {
+        const Icon = m.icon;
+        return (
+          <span key={m.key} className="flex items-center gap-1 text-xs text-slate-500">
+            <Icon size={12} className={metricColors(m, entry[m.key]).text}/>{m.label} <strong className="text-slate-700">{entry[m.key]}</strong>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
+  const [moodEntries, setMoodEntries]   = useState([]);
+  const [formEntry, setFormEntry]       = useState(null);
+  const [detailDate, setDetailDate]     = useState(null);
+  const [view, setView]                 = useState("calendar");
   const [calendarDate, setCalendarDate] = useState(new Date());
-  const [habitsExpanded, setHabitsExpanded] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(14);
 
   const uid = session?.user?.id;
 
-  useEffect(() => { loadMoodEntries(); loadHabits(); }, []);
+  useEffect(() => { loadMoodEntries(); }, []);
 
   const loadMoodEntries = async () => {
     const { data } = await supabase.from("mood_entries").select("*").eq("user_id", uid).order("date", { ascending: false });
     if (data) setMoodEntries(data);
   };
 
-  const loadHabits = async () => {
-    const { data } = await supabase.from("habit_definitions").select("*").eq("user_id", uid).order("created_at");
-    if (data) setHabits(data);
-  };
-
   const saveMoodEntry = async (entry) => {
-    const payload = { user_id: uid, date: entry.date, mood: entry.mood, energy: entry.energy, stress: entry.stress, sleep: entry.sleep, tags: entry.tags||[], note: entry.note||"", completed_habits: entry.completedHabits||[] };
-    if (entry.id) {
-      await supabase.from("mood_entries").update(payload).eq("id", entry.id).eq("user_id", uid);
-      setMoodEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...payload, id: entry.id } : e));
+    // Habits now live on the Tasks tab, so completed_habits is only written (empty) for new rows.
+    const payload = { user_id: uid, date: entry.date, mood: entry.mood, energy: entry.energy, stress: entry.stress, sleep: entry.sleep, tags: entry.tags||[], note: entry.note||"" };
+    const existing = entry.id ? { id: entry.id } : moodEntries.find(e => e.date === entry.date);
+    if (existing) {
+      await supabase.from("mood_entries").update(payload).eq("id", existing.id).eq("user_id", uid);
+      setMoodEntries(prev => prev.map(e => e.id === existing.id ? { ...e, ...payload } : e));
     } else {
-      const existing = moodEntries.find(e => e.date === entry.date);
-      if (existing) {
-        await supabase.from("mood_entries").update(payload).eq("id", existing.id).eq("user_id", uid);
-        setMoodEntries(prev => prev.map(e => e.id === existing.id ? { ...e, ...payload } : e));
-      } else {
-        const { data } = await supabase.from("mood_entries").insert(payload).select().single();
-        if (data) setMoodEntries(prev => [data, ...prev]);
-      }
+      const { data } = await supabase.from("mood_entries").insert({ ...payload, completed_habits: [] }).select().single();
+      if (data) setMoodEntries(prev => [data, ...prev]);
     }
   };
 
@@ -644,18 +848,9 @@ function MoodTab({ session, isMobile, dailyTasks = {} }) {
     setMoodEntries(prev => prev.filter(e => e.id !== id));
   };
 
-  const saveHabit = async (name) => {
-    const { data } = await supabase.from("habit_definitions").insert({ user_id: uid, name }).select().single();
-    if (data) setHabits(prev => [...prev, data]);
-  };
-
-  const deleteHabit = async (id) => {
-    await supabase.from("habit_definitions").delete().eq("id", id).eq("user_id", uid);
-    setHabits(prev => prev.filter(h => h.id !== id));
-  };
-
   const entryByDate = {};
   moodEntries.forEach(e => { entryByDate[e.date] = e; });
+  const sortedEntries = [...moodEntries].sort((a,b) => b.date.localeCompare(a.date));
 
   const year = calendarDate.getFullYear();
   const month = calendarDate.getMonth();
@@ -663,347 +858,343 @@ function MoodTab({ session, isMobile, dailyTasks = {} }) {
   const daysInMonth = new Date(year, month+1, 0).getDate();
   const monthName = calendarDate.toLocaleString("default", { month: "long" });
   const todayStr = todayISO();
+  const monthPrefix = `${year}-${String(month+1).padStart(2,"0")}`;
+  const monthEntries = moodEntries.filter(e => e.date.startsWith(monthPrefix));
+  const monthAvg = monthEntries.length ? (monthEntries.reduce((s,e) => s + e.mood, 0) / monthEntries.length).toFixed(1) : null;
 
-  const handleDayClick = (isoDate) => {
-    const entry = entryByDate[isoDate];
-    if (entry) setSelectedDay(isoDate);
-    else { setEditingEntry({ date: isoDate }); setShowForm(true); }
+  const todayEntry = entryByDate[todayStr];
+
+  const openDay = (isoDate) => {
+    if (entryByDate[isoDate]) setDetailDate(isoDate);
+    else setFormEntry({ date: isoDate });
   };
 
   return (
-    <div>
-      <div className="mb-6">
-        <button onClick={() => { setEditingEntry(entryByDate[todayStr] || { date: todayStr }); setShowForm(true); }}
-          className="w-full py-4 bg-violet-600 text-white rounded-xl hover:bg-violet-700 flex items-center justify-center gap-2 font-semibold text-lg shadow-md">
-          <SmilePlus size={22} />
-          {entryByDate[todayStr] ? "Edit Today's Check-in" : "Log Today's Mood"}
-        </button>
-      </div>
-
-      {showForm && (
-        <MoodForm entry={editingEntry} moodEntries={moodEntries} habits={habits}
-          onSave={async (entry) => { await saveMoodEntry(entry); setShowForm(false); setEditingEntry(null); }}
-          onDelete={async (id) => { await deleteMoodEntry(id); setShowForm(false); setEditingEntry(null); }}
-          onClose={() => { setShowForm(false); setEditingEntry(null); }}
-          isMobile={isMobile} />
-      )}
-
-      <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 mb-6">
-        <div className="flex items-center justify-between mb-4">
-          <button onClick={() => setCalendarDate(new Date(year, month-1, 1))} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft size={18} className="text-slate-500"/></button>
-          <h2 className="text-lg font-bold text-slate-800">{monthName} {year}</h2>
-          <button onClick={() => setCalendarDate(new Date(year, month+1, 1))} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronRight size={18} className="text-slate-500"/></button>
-        </div>
-        <div className="grid grid-cols-7 mb-2">
-          {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d => <div key={d} className="text-center text-xs font-semibold text-slate-400 py-1">{d}</div>)}
-        </div>
-        <div className="grid grid-cols-7 gap-1">
-          {Array.from({ length: firstDay }).map((_,i) => <div key={`e${i}`}/>)}
-          {Array.from({ length: daysInMonth }).map((_,i) => {
-            const day = i+1;
-            const isoDate = `${year}-${String(month+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
-            const entry = entryByDate[isoDate];
-            const isToday = isoDate === todayStr;
-            const colors = entry ? MOOD_COLORS(entry.mood) : null;
-            const dayTasks = dailyTasks[isoDate]?.tasks || [];
-            const taskDone = dayTasks.filter(t => t.status === "complete").length;
-            const taskTotal = dayTasks.length;
-            return (
-              <button key={day} onClick={() => handleDayClick(isoDate)}
-                className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all relative
-                  ${entry ? `${colors.bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 hover:bg-violet-50" : "hover:bg-slate-50 border border-transparent"}`}>
-                <span className={`text-sm font-semibold ${entry?"text-white":isToday?"text-violet-600":"text-slate-600"}`}>{day}</span>
-                {entry && <span className="text-[9px] font-bold text-white opacity-90 leading-tight">{entry.mood}/{entry.energy}/{entry.sleep}</span>}
-                {taskTotal > 0 && (
-                  <span className={`text-[9px] leading-none mt-0.5 font-medium ${entry ? "text-white opacity-60" : "text-slate-400"}`}>
-                    ✓{taskDone}/{taskTotal}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-        <div className="flex items-center justify-center gap-4 mt-4 pt-4 border-t border-slate-100">
-          {[{label:"Very Low (1)",score:1},{label:"Low (2-3)",score:2},{label:"Mid (4-5)",score:4},{label:"High (6-7)",score:6},{label:"Best (8)",score:8}].map(({label,score}) => (
-            <div key={label} className="flex items-center gap-1.5">
-              <div className={`w-3 h-3 rounded-full ${MOOD_COLORS(score).bg}`}/>
-              <span className="text-xs text-slate-500">{label}</span>
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+        {todayEntry ? (
+          <div className="flex items-center gap-4">
+            <div className={`w-14 h-14 rounded-full ${MOOD_COLORS(todayEntry.mood).bg} flex items-center justify-center text-white font-bold text-2xl flex-shrink-0`}>{todayEntry.mood}</div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Today</p>
+              <p className={`font-bold ${MOOD_COLORS(todayEntry.mood).text}`}>{moodLabel(todayEntry.mood)}</p>
+              <MetricPills entry={todayEntry}/>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {selectedDay && entryByDate[selectedDay] && (
-        <DayDetail entry={entryByDate[selectedDay]} habits={habits}
-          onEdit={(entry) => { setSelectedDay(null); setEditingEntry(entry); setShowForm(true); }}
-          onClose={() => setSelectedDay(null)} />
-      )}
-
-      <div className="bg-white rounded-xl shadow-sm border border-slate-100 mb-6 overflow-hidden">
-        <button onClick={() => setHabitsExpanded(h => !h)}
-          className="w-full flex items-center justify-between px-5 py-4 hover:bg-slate-50 transition-colors text-left">
-          <div className="flex items-center gap-2">
-            <Check size={18} className="text-violet-500"/>
-            <span className="font-bold text-slate-800">Habit Tracker</span>
-            {habits.length > 0 && <span className="text-xs bg-violet-100 text-violet-600 font-semibold px-2 py-0.5 rounded-full">{habits.length}</span>}
+            <button onClick={() => setFormEntry(todayEntry)} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex items-center gap-1 flex-shrink-0"><Edit2 size={13}/> Edit</button>
           </div>
-          <span className="text-slate-400 text-lg">{habitsExpanded ? "" : "+"}</span>
-        </button>
-        {habitsExpanded && <HabitManager habits={habits} onAdd={saveHabit} onDelete={deleteHabit} />}
+        ) : (
+          <>
+            <p className="font-bold text-slate-800 flex items-center gap-2"><SmilePlus size={18} className="text-violet-500"/> How are you feeling today?</p>
+            <p className="text-xs text-slate-400 mt-0.5 mb-3">Tap a score to start your check-in.</p>
+            <div className="flex gap-1.5">
+              {[1,2,3,4,5,6,7,8].map(n => (
+                <button key={n} onClick={() => setFormEntry({ date: todayStr, mood: n })}
+                  className={`flex-1 py-3 rounded-lg text-sm font-bold ${MOOD_COLORS(n).light} ${MOOD_COLORS(n).text} hover:brightness-95 hover:scale-105 transition-all touch-manipulation`}>
+                  {n}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
-      {moodEntries.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-          <h3 className="font-bold text-slate-800 mb-3 text-lg">Recent Check-ins</h3>
-          <div className="space-y-2">
-            {[...moodEntries].sort((a,b) => b.date.localeCompare(a.date)).slice(0,7).map(entry => {
-              const colors = MOOD_COLORS(entry.mood);
+      <Segmented value={view} onChange={setView}
+        options={[{id:"calendar",label:"Calendar",icon:Calendar},{id:"history",label:"History",icon:History}]}/>
+
+      {view === "calendar" && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <button onClick={() => setCalendarDate(new Date(year, month-1, 1))} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft size={18} className="text-slate-500"/></button>
+            <div className="text-center">
+              <h2 className="text-lg font-bold text-slate-800">{monthName} {year}</h2>
+              <p className="text-xs text-slate-400">{monthEntries.length} check-in{monthEntries.length===1?"":"s"}{monthAvg && <> · avg mood <strong className={MOOD_COLORS(parseFloat(monthAvg)).text}>{monthAvg}</strong></>}</p>
+            </div>
+            <button onClick={() => setCalendarDate(new Date(year, month+1, 1))} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronRight size={18} className="text-slate-500"/></button>
+          </div>
+          <div className="grid grid-cols-7 mb-2">
+            {["S","M","T","W","T","F","S"].map((d,i) => <div key={i} className="text-center text-xs font-semibold text-slate-400 py-1">{d}</div>)}
+          </div>
+          <div className="grid grid-cols-7 gap-1">
+            {Array.from({ length: firstDay }).map((_,i) => <div key={`e${i}`}/>)}
+            {Array.from({ length: daysInMonth }).map((_,i) => {
+              const day = i+1;
+              const isoDate = `${monthPrefix}-${String(day).padStart(2,"0")}`;
+              const entry = entryByDate[isoDate];
+              const isToday = isoDate === todayStr;
+              const isFuture = isoDate > todayStr;
+              const dayTasks = tasksOn(dailyTasks, isoDate);
+              const taskDone = dayTasks.filter(t => t.status === "complete").length;
               return (
-                <button key={entry.id} onClick={() => setSelectedDay(entry.date)}
-                  className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50 transition-colors text-left">
-                  <div className={`w-10 h-10 rounded-full ${colors.bg} flex items-center justify-center text-white font-bold text-lg flex-shrink-0`}>{entry.mood}</div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-slate-700">{fmtDisplay(entry.date)}</span>
-                      {(entry.tags||[]).map(tag => <span key={tag} className={`text-xs px-2 py-0.5 rounded-full ${colors.light} ${colors.text} font-medium`}>{tag}</span>)}
-                    </div>
-                    {entry.note && <p className="text-sm text-slate-400 truncate mt-0.5">{entry.note}</p>}
-                  </div>
+                <button key={day} onClick={() => openDay(isoDate)} disabled={isFuture}
+                  className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all touch-manipulation
+                    ${entry ? `${MOOD_COLORS(entry.mood).bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 text-violet-600 hover:bg-violet-50" : isFuture ? "text-slate-300 cursor-default" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}>
+                  <span className="text-sm font-semibold">{day}</span>
+                  {dayTasks.length > 0 && (
+                    <span className={`text-[9px] leading-none mt-0.5 font-medium ${entry ? "text-white/80" : "text-slate-400"}`}>✓{taskDone}/{dayTasks.length}</span>
+                  )}
                 </button>
               );
             })}
           </div>
+          <div className="flex items-center justify-center gap-1.5 mt-4 pt-4 border-t border-slate-100 flex-wrap">
+            <span className="text-xs text-slate-400 mr-1">Low</span>
+            {[1,2,4,6,8].map(s => <div key={s} className={`w-5 h-3 rounded ${MOOD_COLORS(s).bg}`}/>)}
+            <span className="text-xs text-slate-400 ml-1">High</span>
+            <span className="text-xs text-slate-400 ml-4">✓ tasks done</span>
+          </div>
         </div>
       )}
-    </div>
-  );
-}
 
-function HabitManager({ habits, onAdd, onDelete }) {
-  const [newHabit, setNewHabit]       = useState("");
-  const [confirmDelete, setConfirmDelete] = useState(null);
-  const addHabit = async () => {
-    const name = newHabit.trim();
-    if (!name || habits.some(h => h.name.toLowerCase() === name.toLowerCase())) return;
-    await onAdd(name); setNewHabit("");
-  };
-  return (
-    <div className="px-5 pb-5 border-t border-slate-100">
-      <p className="text-xs text-slate-400 mt-4 mb-3">Habits added here appear as a checklist in every daily check-in.</p>
-      <div className="flex gap-2 mb-4">
-        <input value={newHabit} onChange={e => setNewHabit(e.target.value)} onKeyDown={e => { if (e.key==="Enter") { e.preventDefault(); addHabit(); }}}
-          placeholder="e.g. Morning walk, Read..." className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:border-violet-400 focus:outline-none" />
-        <button onClick={addHabit} disabled={!newHabit.trim()} className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm font-semibold hover:bg-violet-700 disabled:opacity-40">Add</button>
-      </div>
-      {habits.length === 0 ? <p className="text-sm text-slate-400 text-center py-4">No habits yet.</p> : (
-        <div className="space-y-2">
-          {habits.map(habit => (
-            <div key={habit.id} className="flex items-center justify-between px-3 py-2.5 bg-slate-50 rounded-lg border border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full bg-violet-400 flex-shrink-0"/>
-                <span className="text-sm font-medium text-slate-700">{habit.name}</span>
-              </div>
-              {confirmDelete === habit.id ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-rose-600">Remove?</span>
-                  <button onClick={() => { onDelete(habit.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-rose-600 text-white rounded font-semibold">Yes</button>
-                  <button onClick={() => setConfirmDelete(null)} className="text-xs px-2 py-1 bg-slate-200 text-slate-600 rounded font-semibold">No</button>
+      {view === "history" && (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+          {sortedEntries.length === 0 ? (
+            <div className="text-center py-8">
+              <Heart size={32} className="text-slate-300 mx-auto mb-3"/>
+              <p className="text-slate-400 text-sm">No check-ins yet.</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {groupByMonth(sortedEntries.slice(0, visibleCount), e => new Date(e.date + "T00:00:00")).map(group => (
+                <div key={group.key}>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">{group.label}</p>
+                  <div className="space-y-1">
+                    {group.items.map(entry => {
+                      const colors = MOOD_COLORS(entry.mood);
+                      return (
+                        <button key={entry.id} onClick={() => setDetailDate(entry.date)}
+                          className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-50 transition-colors text-left">
+                          <div className={`w-10 h-10 rounded-full ${colors.bg} flex items-center justify-center text-white font-bold text-lg flex-shrink-0`}>{entry.mood}</div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-700 text-sm">{isoToLong(entry.date)}</span>
+                              <span className={`text-xs font-medium ${colors.text}`}>{moodLabel(entry.mood)}</span>
+                            </div>
+                            <MetricPills entry={entry}/>
+                            {(entry.tags||[]).length > 0 && (
+                              <div className="flex gap-1 flex-wrap mt-1.5">
+                                {entry.tags.map(tag => <span key={tag} className={`text-xs px-2 py-0.5 rounded-full ${colors.light} ${colors.text} font-medium`}>{tag}</span>)}
+                              </div>
+                            )}
+                            {entry.note && <p className="text-sm text-slate-400 mt-1 line-clamp-2">{entry.note}</p>}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
-              ) : (
-                <button onClick={() => setConfirmDelete(habit.id)} className="text-slate-300 hover:text-rose-400"><X size={15}/></button>
+              ))}
+              {sortedEntries.length > visibleCount && (
+                <button onClick={() => setVisibleCount(c => c + 14)} className="w-full py-2 text-sm font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-50 rounded-lg">
+                  Show older check-ins ({sortedEntries.length - visibleCount} more)
+                </button>
               )}
             </div>
-          ))}
+          )}
         </div>
+      )}
+
+      {detailDate && entryByDate[detailDate] && (
+        <DayDetail entry={entryByDate[detailDate]} habits={habits} dailyTasks={dailyTasks}
+          onEdit={(entry) => { setDetailDate(null); setFormEntry(entry); }}
+          onClose={() => setDetailDate(null)} />
+      )}
+
+      {formEntry && (
+        <MoodForm entry={formEntry} moodEntries={moodEntries}
+          onSave={async (entry) => { await saveMoodEntry(entry); setFormEntry(null); }}
+          onDelete={async (id) => { await deleteMoodEntry(id); setFormEntry(null); }}
+          onClose={() => setFormEntry(null)}
+          isMobile={isMobile} />
       )}
     </div>
   );
 }
 
-function DayDetail({ entry, onEdit, onClose, habits }) {
+function DayDetail({ entry, onEdit, onClose, habits, dailyTasks }) {
   const colors = MOOD_COLORS(entry.mood);
-  const completedIds = new Set(entry.completed_habits || []);
-  const completedHabits = habits.filter(h => completedIds.has(h.id));
+  const dayTasks = tasksOn(dailyTasks, entry.date);
+  const tasksDone = dayTasks.filter(t => t.status === "complete").length;
+  const doneHabitIds = habitsDoneOn(dailyTasks, entry.date);
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5 mb-6">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className={`w-12 h-12 rounded-full ${colors.bg} flex items-center justify-center text-white text-xl font-bold`}>{entry.mood}</div>
-          <div>
-            <h3 className="font-bold text-slate-800">{fmtDisplay(entry.date)}</h3>
-            <p className={`text-sm font-medium ${colors.text}`}>{entry.mood>=7?"Great day":entry.mood>=5?"Good day":entry.mood>=3?"Fair day":"Tough day"}</p>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => onEdit(entry)} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex items-center gap-1"><Edit2 size={13}/> Edit</button>
-          <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"><X size={16}/></button>
-        </div>
+    <Sheet title={isoToLong(entry.date)} onClose={onClose}>
+      <div className="flex items-center gap-3 mb-4">
+        <div className={`w-12 h-12 rounded-full ${colors.bg} flex items-center justify-center text-white text-xl font-bold`}>{entry.mood}</div>
+        <p className={`flex-1 font-semibold ${colors.text}`}>{moodLabel(entry.mood)}</p>
+        <button onClick={() => onEdit(entry)} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex items-center gap-1"><Edit2 size={13}/> Edit</button>
       </div>
       <div className="grid grid-cols-4 gap-2 mb-4">
-        {[{label:"Mood",value:entry.mood,icon:""},{label:"Energy",value:entry.energy,icon:""},{label:"Stress",value:entry.stress,icon:""},{label:"Sleep",value:entry.sleep,icon:""}].map(({label,value,icon}) => (
-          <div key={label} className={`${colors.light} rounded-lg p-3 text-center`}>
-            <div className="text-lg mb-1">{icon}</div>
-            <div className={`text-xl font-bold ${colors.text}`}>{value}</div>
-            <div className="text-xs text-slate-500">{label}</div>
-          </div>
-        ))}
+        {MOOD_METRICS.map(m => {
+          const Icon = m.icon;
+          const c = metricColors(m, entry[m.key]);
+          return (
+            <div key={m.key} className={`${c.light} rounded-lg p-3 text-center`}>
+              <Icon size={16} className={`${c.text} mx-auto mb-1`}/>
+              <div className={`text-xl font-bold ${c.text}`}>{entry[m.key]}</div>
+              <div className="text-xs text-slate-500">{m.label}</div>
+            </div>
+          );
+        })}
       </div>
-      {(entry.tags||[]).length > 0 && <div className="flex gap-2 flex-wrap mb-3">{entry.tags.map(tag => <span key={tag} className={`px-3 py-1 rounded-full text-sm font-medium ${colors.light} ${colors.text}`}>{tag}</span>)}</div>}
-      {completedHabits.length > 0 && (
-        <div className="mb-3">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Habits completed</p>
-          <div className="flex flex-wrap gap-2">
-            {completedHabits.map(h => <span key={h.id} className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-xs font-medium"><Check size={11}/> {h.name}</span>)}
-          </div>
+      {(entry.tags||[]).length > 0 && <div className="flex gap-2 flex-wrap mb-4">{entry.tags.map(tag => <span key={tag} className={`px-3 py-1 rounded-full text-sm font-medium ${colors.light} ${colors.text}`}>{tag}</span>)}</div>}
+      {entry.note && <div className="bg-slate-50 rounded-lg p-3 mb-4"><p className="text-sm text-slate-600 italic">"{entry.note}"</p></div>}
+      {(dayTasks.length > 0 || habits.length > 0) && (
+        <div className="border-t border-slate-100 pt-4">
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">From your Tasks</p>
+          {dayTasks.length > 0 && <p className="text-sm text-slate-600 mb-2"><strong className="text-slate-800">{tasksDone}/{dayTasks.length}</strong> tasks completed</p>}
+          {habits.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {habits.map(h => {
+                const done = doneHabitIds.has(h.id);
+                return (
+                  <span key={h.id} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${done ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-50 text-slate-400 border-slate-200"}`}>
+                    {done ? <Check size={11}/> : <X size={11}/>} {h.name}
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
-      {entry.note && <div className="bg-slate-50 rounded-lg p-3"><p className="text-sm text-slate-600 italic">"{entry.note}"</p></div>}
+    </Sheet>
+  );
+}
+
+function ScaleInput({ metric, value, onChange }) {
+  const Icon = metric.icon;
+  return (
+    <div className="mb-4">
+      <div className="flex justify-between items-center mb-2">
+        <label className="text-sm font-semibold text-slate-700 flex items-center gap-1.5"><Icon size={15} className="text-slate-400"/>{metric.label}{metric.inverted && <span className="text-xs font-normal text-slate-400">(lower is better)</span>}</label>
+        <span className={`text-lg font-bold ${metricColors(metric, value).text}`}>{value}<span className="text-sm text-slate-400 font-normal">/8</span></span>
+      </div>
+      <div className="flex gap-1.5">
+        {[1,2,3,4,5,6,7,8].map(n => {
+          const c = metricColors(metric, n);
+          return <button key={n} onClick={() => onChange(n)} className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all touch-manipulation ${value===n?`${c.bg} text-white shadow-md scale-105`:"bg-slate-100 text-slate-400 hover:bg-slate-200"}`}>{n}</button>;
+        })}
+      </div>
     </div>
   );
 }
 
-function MoodForm({ entry, moodEntries, habits, onSave, onDelete, onClose, isMobile }) {
+const MAX_MOOD_TAGS = 3;
+
+function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
   const isEditing = !!entry?.id;
-  const [formDate, setFormDate]         = useState(entry?.date || todayISO());
-  const [mood, setMood]                 = useState(entry?.mood || 5);
-  const [energy, setEnergy]             = useState(entry?.energy || 5);
-  const [stress, setStress]             = useState(entry?.stress || 4);
-  const [sleep, setSleep]               = useState(entry?.sleep || 5);
-  const [note, setNote]                 = useState(entry?.note || "");
-  const [completedHabits, setCompletedHabits] = useState(new Set(entry?.completed_habits || []));
-  const [tags, setTags]                 = useState(entry?.tags ? [...entry.tags, "","",""].slice(0,3) : ["","",""]);
-  const [pillSearch, setPillSearch]     = useState("");
+  const [formDate, setFormDate] = useState(entry?.date || todayISO());
+  const [values, setValues]     = useState({ mood: entry?.mood || 5, energy: entry?.energy || 5, stress: entry?.stress || 4, sleep: entry?.sleep || 5 });
+  const [note, setNote]         = useState(entry?.note || "");
+  const [tags, setTags]         = useState((entry?.tags || []).slice(0, MAX_MOOD_TAGS));
+  const [tagInput, setTagInput] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const tagStats = {};
   moodEntries.forEach(e => { (e.tags||[]).forEach(tag => { if (!tagStats[tag]) tagStats[tag]={total:0,count:0}; tagStats[tag].total+=e.mood; tagStats[tag].count+=1; }); });
   const rankedTags = Object.entries(tagStats).sort((a,b)=>(b[1].total/b[1].count)-(a[1].total/a[1].count)).map(x=>x[0]);
   const allSuggestions = [...new Set([...rankedTags, ...SEED_TAGS])];
-  const filtered = pillSearch.trim() ? allSuggestions.filter(t=>t.toLowerCase().includes(pillSearch.toLowerCase())) : allSuggestions.slice(0,15);
+  const query = tagInput.trim().toLowerCase();
+  const suggestions = (query ? allSuggestions.filter(t => t.toLowerCase().includes(query)) : allSuggestions).filter(t => !tags.includes(t)).slice(0, 15);
+  const full = tags.length >= MAX_MOOD_TAGS;
 
-  const ScaleInput = ({ label, value, setValue, icon, inverted }) => {
-    const displayColor = inverted ? MOOD_COLORS(9-value) : MOOD_COLORS(value);
-    return (
-      <div className="mb-4">
-        <div className="flex justify-between items-center mb-2">
-          <label className="text-sm font-semibold text-slate-700">{icon} {label}</label>
-          <span className={`text-lg font-bold ${displayColor.text}`}>{value}<span className="text-sm text-slate-400 font-normal">/8</span></span>
-        </div>
-        <div className="flex gap-1.5">
-          {[1,2,3,4,5,6,7,8].map(n => {
-            const c = inverted ? MOOD_COLORS(9-n) : MOOD_COLORS(n);
-            return <button key={n} onClick={() => setValue(n)} className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all ${value===n?`${c.bg} text-white shadow-md scale-105`:"bg-slate-100 text-slate-400 hover:bg-slate-200"}`}>{n}</button>;
-          })}
-        </div>
-      </div>
-    );
+  const addTag = (tag) => {
+    const t = tag.trim().slice(0, 20);
+    if (!t || tags.includes(t) || full) return;
+    setTags([...tags, t]);
+    setTagInput("");
   };
 
   const save = async () => {
-    const finalTags = tags.map(t=>t.trim()).filter(t=>t.length>0);
-    await onSave({ id: entry?.id, date: formDate, mood, energy, stress, sleep, tags: finalTags, note: note.trim(), completedHabits: [...completedHabits] });
+    await onSave({ id: entry?.id, date: formDate, ...values, tags, note: note.trim() });
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-lg border border-slate-100 p-6 mb-6">
-      <div className="flex justify-between items-center mb-5">
-        <h3 className="text-xl font-bold text-slate-800">{isEditing ? "Edit Check-in" : "Daily Check-in"}</h3>
-        <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20}/></button>
-      </div>
+    <Sheet title={isEditing ? "Edit Check-in" : "Daily Check-in"} onClose={onClose} closeOnBackdrop={false}>
       <div className="mb-5">
         <label className="block text-sm font-semibold text-slate-700 mb-1">Date</label>
-        <input type="date" value={formDate} onChange={e => setFormDate(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-base"/>
+        <input type="date" value={formDate} max={todayISO()} onChange={e => setFormDate(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-base"/>
       </div>
-      <ScaleInput label="Mood" value={mood} setValue={setMood} icon=""/>
-      <ScaleInput label="Energy Level" value={energy} setValue={setEnergy} icon=""/>
-      <ScaleInput label="Stress Level" value={stress} setValue={setStress} icon="" inverted/>
-      <ScaleInput label="Sleep Quality" value={sleep} setValue={setSleep} icon=""/>
+      {MOOD_METRICS.map(m => (
+        <ScaleInput key={m.key} metric={m} value={values[m.key]} onChange={v => setValues(prev => ({ ...prev, [m.key]: v }))}/>
+      ))}
       <div className="mb-5">
-        <label className="block text-sm font-semibold text-slate-700 mb-2">Mood Tags</label>
-        <p className="text-xs text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2 mb-3">Tap a suggestion to quick-add, or type any custom tag directly in the boxes below.</p>
-        <div className="mb-3 p-3 bg-slate-50 rounded-lg border border-slate-200">
-          <input value={pillSearch} onChange={e => setPillSearch(e.target.value)} placeholder="Search tags..." className="w-full px-3 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:border-violet-400 focus:outline-none mb-2"/>
+        <label className="block text-sm font-semibold text-slate-700 mb-2">Tags <span className="text-slate-400 font-normal text-xs">(up to {MAX_MOOD_TAGS})</span></label>
+        {tags.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-2">
+            {tags.map(tag => (
+              <span key={tag} className="flex items-center gap-1 pl-3 pr-1.5 py-1 rounded-full text-xs font-semibold bg-violet-600 text-white">
+                {tag}
+                <button onClick={() => setTags(tags.filter(t => t !== tag))} className="p-0.5 rounded-full hover:bg-violet-500" aria-label={`Remove ${tag}`}><X size={12}/></button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input value={tagInput} onChange={e => setTagInput(e.target.value)} disabled={full}
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addTag(tagInput); } }}
+          placeholder={full ? "Tag limit reached" : "Search or type a new tag, then Enter"} maxLength={20}
+          className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:border-violet-400 focus:outline-none mb-2 disabled:bg-slate-50"/>
+        {!full && (
           <div className="flex flex-wrap gap-1.5">
-            {filtered.map(tag => {
-              const used = tags.some(t=>t.trim()===tag);
+            {suggestions.map(tag => {
               const avg = tagStats[tag] ? tagStats[tag].total/tagStats[tag].count : null;
               const colors = avg ? MOOD_COLORS(avg) : null;
               return (
-                <button key={tag} onClick={() => { if (used) return; const next=[...tags]; const idx=next.findIndex(t=>t.trim()===""); if (idx===-1) return; next[idx]=tag; setTags(next); }}
-                  className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${used?"bg-violet-100 text-violet-400 border-violet-200 opacity-50 cursor-not-allowed":colors?`${colors.light} ${colors.text} ${colors.border} hover:opacity-80 cursor-pointer`:"bg-white text-slate-500 border-slate-200 hover:bg-violet-50 hover:text-violet-600 cursor-pointer"}`}>
+                <button key={tag} onClick={() => addTag(tag)}
+                  className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-all ${colors?`${colors.light} ${colors.text} ${colors.border} hover:opacity-80`:"bg-white text-slate-500 border-slate-200 hover:bg-violet-50 hover:text-violet-600"}`}>
                   {tag}{avg && <span className="ml-1 opacity-60">{avg.toFixed(1)}</span>}
                 </button>
               );
             })}
+            {query && !allSuggestions.some(t => t.toLowerCase() === query) && (
+              <button onClick={() => addTag(tagInput)} className="px-2.5 py-1 rounded-full text-xs font-medium border border-dashed border-violet-300 text-violet-600 hover:bg-violet-50">+ "{tagInput.trim()}"</button>
+            )}
           </div>
-        </div>
-        <div className="space-y-2">
-          {[0,1,2].map(idx => (
-            <div key={idx} className="flex items-center gap-2">
-              <span className="text-xs text-slate-400 w-4">{idx+1}.</span>
-              <input value={tags[idx]} onChange={e => { const n=[...tags]; n[idx]=e.target.value; setTags(n); }} placeholder={idx===0?"select above or type...":"optional"} maxLength={20} className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:border-violet-400 focus:outline-none"/>
-              {tags[idx] && <button onClick={() => { const n=[...tags]; n[idx]=""; setTags(n); }} className="text-slate-300 hover:text-slate-500"><X size={14}/></button>}
-            </div>
-          ))}
-        </div>
+        )}
       </div>
       <div className="mb-5">
         <label className="block text-sm font-semibold text-slate-700 mb-1">Journal Note <span className="text-slate-400 font-normal text-xs">(optional)</span></label>
         <textarea value={note} onChange={e => setNote(e.target.value)} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none focus:border-violet-400 focus:outline-none"/>
       </div>
-      {habits.length > 0 && (
-        <div className="mb-5">
-          <label className="block text-sm font-semibold text-slate-700 mb-2">Habits completed today</label>
-          <div className="space-y-2">
-            {habits.map(habit => {
-              const done = completedHabits.has(habit.id);
-              return (
-                <button key={habit.id} onClick={() => { const next=new Set(completedHabits); done?next.delete(habit.id):next.add(habit.id); setCompletedHabits(next); }}
-                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg border transition-all text-left ${done?"bg-emerald-50 border-emerald-300 text-emerald-800":"bg-slate-50 border-slate-200 text-slate-600 hover:border-violet-300 hover:bg-violet-50"}`}>
-                  <div className={`w-5 h-5 rounded flex items-center justify-center flex-shrink-0 border-2 transition-all ${done?"bg-emerald-500 border-emerald-500":"border-slate-300 bg-white"}`}>
-                    {done && <Check size={12} className="text-white" strokeWidth={3}/>}
-                  </div>
-                  <span className={`text-sm font-medium ${done?"line-through opacity-70":""}`}>{habit.name}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      <p className="text-xs text-slate-400 mb-3">Habits are now checked off on the Tasks tab and show up in each day's details here.</p>
       <button onClick={save} className="w-full py-3 bg-violet-600 text-white rounded-lg hover:bg-violet-700 font-semibold flex items-center justify-center gap-2">
         <Check size={18}/> {isEditing ? "Update Check-in" : "Save Check-in"}
       </button>
-      {isEditing && (
-        <button onClick={() => onDelete(entry.id)} className="w-full mt-2 py-3 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-100 font-semibold flex items-center justify-center gap-2">
+      {isEditing && !confirmDelete && (
+        <button onClick={() => setConfirmDelete(true)} className="w-full mt-2 py-3 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-100 font-semibold flex items-center justify-center gap-2">
           <Trash2 size={16}/> Delete Entry
         </button>
       )}
-    </div>
+      {isEditing && confirmDelete && (
+        <div className="mt-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+          <p className="text-red-700 text-sm text-center mb-3">Delete this check-in permanently?</p>
+          <div className="flex gap-2">
+            <button onClick={() => onDelete(entry.id)} className="flex-1 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold">Yes, Delete</button>
+            <button onClick={() => setConfirmDelete(false)} className="flex-1 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold">Cancel</button>
+          </div>
+        </div>
+      )}
+    </Sheet>
   );
 }
 
 // 
 // TASKS TAB
 // 
-function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, addGoal, updateGoal, deleteGoal }) {
+function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit }) {
   const [section, setSection] = useState("daily");
   return (
     <div>
-      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl mb-5">
-        {[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}].map(({id,label,icon:Icon}) => (
-          <button key={id} onClick={() => setSection(id)}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-all ${section===id?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>
-            <Icon size={15}/>{label}
-          </button>
-        ))}
+      <div className="mb-5">
+        <Segmented value={section} onChange={setSection}
+          options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}]}/>
       </div>
-      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} goals={goals}/>}
+      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} goals={goals} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}/>}
       {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals}/>}
       {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} dailyTasks={dailyTasks} kanbanCards={kanbanCards}/>}
     </div>
   );
 }
 
-function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
+function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, addHabit, deleteHabit }) {
   const [viewDate, setViewDate]     = useState(todayISO());
   const [newTaskText, setNewTaskText] = useState("");
   const [newTaskGoal, setNewTaskGoal] = useState("");
@@ -1012,7 +1203,10 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
   const [editGoal, setEditGoal] = useState("");
   const calendarRef = useRef(null);
 
-  const tasks = dailyTasks[viewDate]?.tasks || [];
+  const tasks = tasksOn(dailyTasks, viewDate);
+  const habitItems = (dailyTasks[viewDate]?.tasks || []).filter(t => t.habitId);
+  // Writes this day's tasks while keeping its habit check-offs intact
+  const putTasks = (nextTasks) => saveDailyTasks({ ...dailyTasks, [viewDate]: { tasks: [...nextTasks, ...habitItems] } });
   const isToday = viewDate === todayISO();
   const isTom   = viewDate === tomorrow();
   const done    = tasks.filter(t=>t.status==="complete").length;
@@ -1030,34 +1224,22 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
 
   const addTask = () => {
     if (!newTaskText.trim()) return;
-    const updated = { ...dailyTasks, [viewDate]: { tasks: [...tasks, { id: Date.now(), text: newTaskText.trim(), status: "pending", goalId: newTaskGoal||null }] } };
-    saveDailyTasks(updated); setNewTaskText(""); setNewTaskGoal("");
+    putTasks([...tasks, { id: Date.now(), text: newTaskText.trim(), status: "pending", goalId: newTaskGoal||null }]);
+    setNewTaskText(""); setNewTaskGoal("");
   };
 
   const saveTaskEdit = (taskId) => {
     if (!editText.trim()) return;
-    const updated = { 
-      ...dailyTasks, 
-      [viewDate]: { 
-        tasks: tasks.map(t => 
-          t.id === taskId 
-            ? { ...t, text: editText.trim(), goalId: editGoal || null } 
-            : t
-        ) 
-      } 
-    };
-    saveDailyTasks(updated);
+    putTasks(tasks.map(t => t.id === taskId ? { ...t, text: editText.trim(), goalId: editGoal || null } : t));
     setEditingTask(null);
   };
 
   const setStatus = (taskId, status) => {
-    const updated = { ...dailyTasks, [viewDate]: { tasks: tasks.map(t => t.id===taskId?{...t,status}:t) } };
-    saveDailyTasks(updated);
+    putTasks(tasks.map(t => t.id===taskId?{...t,status}:t));
   };
 
   const deleteTask = (taskId) => {
-    const updated = { ...dailyTasks, [viewDate]: { tasks: tasks.filter(t=>t.id!==taskId) } };
-    saveDailyTasks(updated);
+    putTasks(tasks.filter(t=>t.id!==taskId));
   };
 
   const goalColor = (goalId) => {
@@ -1074,7 +1256,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
         <div className="-mx-4 px-4 overflow-x-auto" ref={calendarRef}>
           <div className="flex gap-1 pb-2 min-w-max">
             {days14.map(d => {
-              const t = dailyTasks[d]?.tasks || [];
+              const t = tasksOn(dailyTasks, d);
               const allDone = t.length>0 && t.every(x=>x.status==="complete");
               const hasPending = t.some(x=>x.status==="pending");
               const isActive = d===viewDate;
@@ -1190,6 +1372,103 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals }) {
           <button onClick={addTask} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"><Plus size={16}/></button>
         </div>
       </div>
+      <HabitsCard habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
+        dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} viewDate={viewDate} isMobile={isMobile}/>
+    </div>
+  );
+}
+
+function HabitsCard({ habits, addHabit, deleteHabit, dailyTasks, saveDailyTasks, viewDate, isMobile }) {
+  const [managing, setManaging] = useState(false);
+  const doneIds = habitsDoneOn(dailyTasks, viewDate);
+  const doneCount = habits.filter(h => doneIds.has(h.id)).length;
+  const isFuture = viewDate > todayISO();
+
+  const toggle = (habitId) => {
+    const items = dailyTasks[viewDate]?.tasks || [];
+    const next = doneIds.has(habitId)
+      ? items.filter(t => t.habitId !== habitId)
+      : [...items, { id: `habit-${habitId}`, habitId, status: "complete" }];
+    saveDailyTasks({ ...dailyTasks, [viewDate]: { tasks: next } });
+  };
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <Repeat size={16} className="text-violet-500"/>
+          <h3 className="font-bold text-slate-800">Daily Habits</h3>
+          {habits.length > 0 && <span className="text-xs bg-violet-100 text-violet-600 font-semibold px-2 py-0.5 rounded-full">{doneCount}/{habits.length}</span>}
+        </div>
+        {habits.length > 0 && (
+          <button onClick={() => setManaging(m => !m)} className={`p-1.5 rounded-lg transition-colors ${managing ? "bg-violet-100 text-violet-600" : "text-slate-400 hover:text-slate-600 hover:bg-slate-100"}`} title="Manage habits">
+            <Settings size={15}/>
+          </button>
+        )}
+      </div>
+      {(managing || habits.length === 0) ? (
+        <HabitManager habits={habits} onAdd={addHabit} onDelete={deleteHabit} onDone={habits.length > 0 ? () => setManaging(false) : null}/>
+      ) : (
+        <div className="space-y-2">
+          {habits.map(habit => {
+            const done = doneIds.has(habit.id);
+            const streak = habitStreak(dailyTasks, habit.id, viewDate);
+            return (
+              <button key={habit.id} onClick={() => toggle(habit.id)} disabled={isFuture}
+                className={`w-full flex items-center gap-3 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-all text-left touch-manipulation disabled:opacity-50 ${done ? "bg-emerald-50 border-emerald-200" : "bg-white border-slate-200 hover:border-violet-300 hover:bg-violet-50"}`}>
+                <div className={`${isMobile?"w-7 h-7":"w-5 h-5"} rounded-md flex items-center justify-center flex-shrink-0 border-2 transition-all ${done ? "bg-emerald-500 border-emerald-500" : "border-slate-300 bg-white"}`}>
+                  {done && <Check size={isMobile?15:12} className="text-white" strokeWidth={3}/>}
+                </div>
+                <span className={`flex-1 text-sm font-medium ${done ? "text-emerald-800" : "text-slate-700"}`}>{habit.name}</span>
+                {streak > 0 && <span className="flex items-center gap-0.5 text-xs font-semibold text-amber-600"><Flame size={13}/>{streak}</span>}
+              </button>
+            );
+          })}
+          {isFuture && <p className="text-xs text-slate-400 text-center pt-1">Habits can be checked off on the day.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HabitManager({ habits, onAdd, onDelete, onDone }) {
+  const [newHabit, setNewHabit]       = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const addHabit = async () => {
+    const name = newHabit.trim();
+    if (!name || habits.some(h => h.name.toLowerCase() === name.toLowerCase())) return;
+    await onAdd(name); setNewHabit("");
+  };
+  return (
+    <div>
+      <p className="text-xs text-slate-400 mb-3">Habits repeat every day. Check them off here; they also show up in each day's mood details.</p>
+      <div className="flex gap-2 mb-3">
+        <input value={newHabit} onChange={e => setNewHabit(e.target.value)} onKeyDown={e => { if (e.key==="Enter") { e.preventDefault(); addHabit(); }}}
+          placeholder="e.g. Morning walk, Read 10 pages" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:border-violet-400 focus:outline-none" />
+        <button onClick={addHabit} disabled={!newHabit.trim()} className="px-4 py-2 bg-violet-600 text-white rounded-lg text-sm font-semibold hover:bg-violet-700 disabled:opacity-40">Add</button>
+      </div>
+      {habits.length > 0 && (
+        <div className="space-y-2">
+          {habits.map(habit => (
+            <div key={habit.id} className="flex items-center justify-between px-3 py-2.5 bg-slate-50 rounded-lg border border-slate-100">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-violet-400 flex-shrink-0"/>
+                <span className="text-sm font-medium text-slate-700">{habit.name}</span>
+              </div>
+              {confirmDelete === habit.id ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-rose-600">Remove?</span>
+                  <button onClick={() => { onDelete(habit.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-rose-600 text-white rounded font-semibold">Yes</button>
+                  <button onClick={() => setConfirmDelete(null)} className="text-xs px-2 py-1 bg-slate-200 text-slate-600 rounded font-semibold">No</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmDelete(habit.id)} className="text-slate-300 hover:text-rose-400"><X size={15}/></button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {onDone && <button onClick={onDone} className="w-full mt-3 py-2 text-sm font-medium text-violet-600 hover:bg-violet-50 rounded-lg">Done</button>}
     </div>
   );
 }
@@ -1561,7 +1840,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
 //
 // TASK INSIGHTS
 //
-function TaskInsights({ dailyTasks, kanbanCards, goals }) {
+function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
   const [timeRange, setTimeRange] = useState("all");
 
   const stats = (() => {
@@ -1569,7 +1848,7 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
 
     const allTasks = Object.entries(dailyTasks)
       .filter(([date]) => !cutoff || date >= cutoff)
-      .flatMap(([date, {tasks}]) => (tasks || []).map(t => ({...t, date})));
+      .flatMap(([date, {tasks}]) => (tasks || []).filter(t => !t.habitId).map(t => ({...t, date})));
     const completed = allTasks.filter(t => t.status === "complete");
     const skipped   = allTasks.filter(t => t.status === "skipped");
     const pending   = allTasks.filter(t => t.status === "pending");
@@ -1581,7 +1860,7 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
     for (let i = 0; i < 365; i++) {
       const y=checkDate.getFullYear(); const mo=String(checkDate.getMonth()+1).padStart(2,"0"); const dy=String(checkDate.getDate()).padStart(2,"0");
       const ds = `${y}-${mo}-${dy}`;
-      const dayTasks = dailyTasks[ds]?.tasks || [];
+      const dayTasks = tasksOn(dailyTasks, ds);
       if (dayTasks.some(t => t.status === "complete")) { streak++; checkDate.setDate(checkDate.getDate()-1); }
       else if (i === 0) { checkDate.setDate(checkDate.getDate()-1); } // today hasn't been completed yet
       else break;
@@ -1592,7 +1871,7 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
       const d=new Date(); d.setDate(d.getDate()-(6-i));
       const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0");
       const ds=`${y}-${m}-${day}`;
-      const dt=dailyTasks[ds]?.tasks||[];
+      const dt=tasksOn(dailyTasks, ds);
       const done=dt.filter(t=>t.status==="complete").length;
       return { label: new Date(ds+"T00:00:00").toLocaleDateString("en-US",{weekday:"short"}), done, total: dt.length, rate: dt.length > 0 ? Math.round((done/dt.length)*100) : null };
     });
@@ -1610,10 +1889,20 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
       if (diff < 0) early++; else if (diff === 0) ontime++; else late++;
     });
 
-    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7 };
+    // Habit consistency: share of days checked off since the habit was created (bounded by the range)
+    const today = todayISO();
+    const habitStats = habits.map(h => {
+      const created = h.created_at ? toISO(new Date(h.created_at)) : today;
+      const from = cutoff && cutoff > created ? cutoff : created;
+      let days = 0, done = 0;
+      for (let d = from; d <= today && days < 3650; d = addDaysISO(d, 1)) { days++; if (habitsDoneOn(dailyTasks, d).has(h.id)) done++; }
+      return { id: h.id, name: h.name, done, days, rate: days ? Math.round(done/days*100) : 0, streak: habitStreak(dailyTasks, h.id, today) };
+    });
+
+    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7, habitStats };
   })();
 
-  if (stats.total === 0 && kanbanCards.length === 0) return null;
+  if (stats.total === 0 && kanbanCards.length === 0 && habits.length === 0) return null;
 
   const maxLast7 = Math.max(...stats.last7.map(d => d.total), 1);
 
@@ -1678,6 +1967,26 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
         </div>
       )}
 
+      {stats.habitStats.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-5">
+          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Repeat size={15} className="text-violet-500"/> Habit Consistency</h3>
+          <div className="space-y-3">
+            {stats.habitStats.map(h => (
+              <div key={h.id}>
+                <div className="flex items-center justify-between text-sm mb-1">
+                  <span className="font-medium text-slate-700">{h.name}</span>
+                  <span className="flex items-center gap-2 text-xs text-slate-500">
+                    {h.streak > 0 && <span className="flex items-center gap-0.5 font-semibold text-amber-600"><Flame size={12}/>{h.streak}</span>}
+                    {h.done}/{h.days} days
+                  </span>
+                </div>
+                <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-violet-500 rounded-full" style={{width:`${h.rate}%`}}/></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {stats.kanban.total > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h3 className="font-bold text-slate-800 mb-4">Kanban Card Timing</h3>
@@ -1712,7 +2021,7 @@ function TaskInsights({ dailyTasks, kanbanCards, goals }) {
 //
 // INSIGHTS TAB
 //
-function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals }) {
+function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits }) {
   const [moodEntries, setMoodEntries] = useState([]);
   const [timeRange, setTimeRange]     = useState("30");
   const uid = session?.user?.id;
@@ -1729,7 +2038,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals }) {
         <p className="text-slate-400 text-sm">Log at least 3 mood check-ins to start seeing patterns.</p>
         <p className="text-slate-400 text-sm mt-1">You have {moodEntries.length} so far.</p>
       </div>
-      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>
+      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>
     </div>
   );
 
@@ -1773,8 +2082,8 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals }) {
           <div className="relative" style={{height:"120px"}}>
             <div className="absolute left-0 top-0 bottom-0 w-8 flex flex-col justify-between text-xs text-slate-300 text-right pr-1"><span>8</span><span>4</span><span>1</span></div>
             <div className="ml-10 h-full relative">
-              <svg className="absolute inset-0 w-full h-full" style={{overflow:"visible"}}>
-                <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x}%,${y}%`; }).join(" ")} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{overflow:"visible"}}>
+                <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x},${y}`; }).join(" ")} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
               </svg>
               {timeline.map((e,i) => {
                 const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; const colors=MOOD_COLORS(e.mood);
@@ -1832,7 +2141,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals }) {
           </div>
         </div>
       )}
-      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}/>
+      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>
     </div>
   );
 }
