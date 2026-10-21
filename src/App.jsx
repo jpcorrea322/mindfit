@@ -241,11 +241,14 @@ export default function App() {
   };
 
   const updateGoal = async (id, updates) => {
-    await supabase.from("tasks_goals").update(updates).eq("id", id).eq("user_id", uid());
     setGoals(prev => prev.map(g => g.id === id ? { ...g, ...updates } : g));
+    await supabase.from("tasks_goals").update(updates).eq("id", id).eq("user_id", uid());
   };
 
   const deleteGoal = async (id) => {
+    // Older Kanban cards may still reference the goal through a foreign key
+    await supabase.from("tasks_kanban").update({ goal_id: null }).eq("goal_id", id).eq("user_id", uid());
+    setKanbanCards(prev => prev.map(c => c.goal_id === id ? { ...c, goal_id: null } : c));
     await supabase.from("tasks_goals").delete().eq("id", id).eq("user_id", uid());
     setGoals(prev => prev.filter(g => g.id !== id));
   };
@@ -447,7 +450,7 @@ const getProgressionData = (workouts, exerciseName, timeScale) => {
 
 function WorkoutsTab({ session, isMobile }) {
   const [workouts, setWorkouts]           = useState([]);
-  const [formWorkout, setFormWorkout]     = useState(null); // null = closed, {} = new, workout = editing
+  const [formWorkout, setFormWorkout]     = useState(null); // null = closed, no id = new (maybe prefilled), id = editing
   const [view, setView]                   = useState("history");
   const [typeFilter, setTypeFilter]       = useState("All");
   const [visibleCount, setVisibleCount]   = useState(15);
@@ -524,7 +527,9 @@ function WorkoutsTab({ session, isMobile }) {
       </button>
 
       <Segmented value={view} onChange={setView}
-        options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp}]}/>
+        options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp},{id:"program",label:"Program",icon:Calendar}]}/>
+
+      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout}/>}
 
       {view === "history" && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
@@ -650,7 +655,7 @@ function WorkoutsTab({ session, isMobile }) {
       )}
 
       {formWorkout && (
-        <WorkoutForm workout={formWorkout.id ? formWorkout : null} isMobile={isMobile}
+        <WorkoutForm workout={formWorkout} isMobile={isMobile}
           onSave={async (w) => { await saveWorkout(w); setFormWorkout(null); }}
           onDelete={async (id) => { await deleteWorkout(id); setFormWorkout(null); }}
           onClose={() => setFormWorkout(null)}/>
@@ -659,11 +664,321 @@ function WorkoutsTab({ session, isMobile }) {
   );
 }
 
+//
+// PPL PROGRAM (12-week weekly undulating periodization)
+//
+const PPL_DAYS = [
+  {
+    id: "push", name: "Push", weekday: "Mon", dayOffset: 0, coreKey: "bench", isLower: false,
+    core: { name: "Barbell Bench Press", cue: "Control 3s descent, explosive press, retract scapula", rest: "3–4 min" },
+    secondary: [
+      { name: "Incline DB Press", cue: "Full stretch at bottom, squeeze at top", rest: "90s–2 min" },
+      { name: "Seated DB Shoulder Press", cue: "Neutral grip, controlled, full ROM", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Cable Lateral Raise", cue: "Slight lean, lead with elbow, no momentum", rest: "60s" },
+      { name: "Triceps Rope Pushdown", cue: "Full extension at bottom, squeeze", rest: "60s" },
+      { name: "Overhead Triceps Extension", cue: "Elbows tight, deep stretch overhead", rest: "60s" },
+    ],
+  },
+  {
+    id: "pull", name: "Pull", weekday: "Wed", dayOffset: 2, coreKey: "dead", isLower: true,
+    core: { name: "Conventional Deadlift", cue: "Brace hard, push floor away, hips and shoulders rise together", rest: "3–5 min" },
+    secondary: [
+      { name: "Weighted Pull-Up (or Lat Pulldown)", cue: "Full hang, chin over bar, control descent", rest: "2 min" },
+      { name: "Seated Cable Row", cue: "Chest proud, drive elbows back, don't round", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Face Pull", cue: "High cable, external rotation at end range", rest: "60s" },
+      { name: "DB Hammer Curl", cue: "Neutral grip, full extension, no swing", rest: "60s" },
+      { name: "Incline DB Curl", cue: "Supinated, deep stretch at bottom", rest: "60s" },
+    ],
+  },
+  {
+    id: "legs", name: "Legs", weekday: "Fri", dayOffset: 4, coreKey: "squat", isLower: true,
+    core: { name: "Back Squat", cue: "Brace, break parallel, drive knees out, vertical torso", rest: "3–4 min" },
+    secondary: [
+      { name: "Romanian Deadlift", cue: "Hinge deep, soft knee, neutral spine, feel the hamstring", rest: "2 min" },
+      { name: "Leg Press", cue: "Full depth, feet shoulder-width, don't lock knees", rest: "90s" },
+    ],
+    ancillary: [
+      { name: "Leg Curl (Lying or Seated)", cue: "Full ROM, hold contraction 1s at top", rest: "60s" },
+      { name: "Walking Lunge", cue: "Upright torso, knee tracks toe, controlled step", rest: "90s" },
+      { name: "Standing Calf Raise", cue: "Full ROM, 2s hold at top, slow eccentric", rest: "60s" },
+    ],
+  },
+];
+
+// The 4-week cycle repeats each month; loads rise each month
+const PPL_PHASES = [
+  { id: "vol",  label: "Volume",      rpe: "RPE 6–7", core: "3–4 × 10–12", sec: "3 × 12–15",   anc: "3 × 15–20", pct: 0.65, style: "bg-sky-50 border-sky-200 text-sky-700",       bar: "bg-sky-500",
+    desc: "High-rep accumulation. Build work capacity and connective tissue. Leave 3+ reps in the tank on every set." },
+  { id: "hype", label: "Hypertrophy", rpe: "RPE 7–8", core: "4 × 8–10",    sec: "3–4 × 10–12", anc: "3 × 12–15", pct: 0.74, style: "bg-amber-50 border-amber-200 text-amber-700", bar: "bg-amber-500",
+    desc: "Prime hypertrophy zone. Moderate load, controlled tempo, maximize time under tension. Last set AMRAP." },
+  { id: "str",  label: "Strength",    rpe: "RPE 8–9", core: "4–5 × 4–6",   sec: "3 × 8–10",    anc: "3 × 10–12", pct: 0.82, style: "bg-rose-50 border-rose-200 text-rose-700",     bar: "bg-rose-500",
+    desc: "Heavy and focused. Neural drive and motor unit recruitment, converting muscle mass to maximal strength." },
+  { id: "dl",   label: "Deload",      rpe: "RPE 4–5", core: "3 × 5",       sec: "2 × 8",       anc: "2 × 10",    pct: 0.50, style: "bg-slate-50 border-slate-200 text-slate-600",  bar: "bg-slate-400",
+    desc: "Recovery week. Cut volume by 50%, keep some weight on the bar. Connective tissue repair, CNS reset, technique work." },
+];
+const PPL_WEEKS = 12;
+const PPL_DEFAULT_RMS = { bench: 225, dead: 315, squat: 275 };
+const PPL_RM_LABELS = { bench: "Bench Press", dead: "Deadlift", squat: "Back Squat" };
+
+const PPL_TIPS = [
+  ["Weekly undulation", "Don't chase PRs every week. Volume week is intentionally easy, hypertrophy week is your bread and butter, strength week is where you test. Each phase primes the next."],
+  ["Deadlift goes first", "Deadlifts are the heaviest lift, so they open Pull day before pull-ups or rows. Reset fully between sets: 3–5 minutes."],
+  ["Tempo", "On volume and hypertrophy weeks: 3s down, 1s pause, explosive up on core lifts. Secondaries: 2s down, controlled up."],
+  ["Deload rules", "Week 4 of every month: halve the sets, keep some weight on the bar. Don't skip it to stay on a roll; that's how you stall in month 2."],
+  ["When to add weight", "The monthly +5 lb (bench) / +10 lb (deadlift, squat) assumes you hit your reps at RPE ≤ 8. If strength week felt like a 9+, hold the load next month."],
+  ["Lower back", "Deadlift (Pull) and RDL (Legs) sit on different days with rest between. If back fatigue builds, swap week-3 RDLs for leg press and leg curl."],
+  ["Rest by tier", "Core: 3–5 min. Secondary: 90s–2 min. Ancillary: 45–75s; short rest there is intentional."],
+  ["Track the right things", "Log weight, reps and RPE for core and secondary sets; weight is enough for ancillary. Strength-week numbers rising month to month means it's working."],
+];
+
+const r5 = (n) => Math.round(n / 5) * 5;
+const pplCoreLoad = (rms, day, weekIdx) => {
+  const month = Math.floor(weekIdx / 4);
+  const inc = month * (day.isLower ? 10 : 5);
+  return r5(((Number(rms[day.coreKey]) || 0) + inc) * PPL_PHASES[weekIdx % 4].pct);
+};
+// "3–4 × 10–12" → { sets: "4", reps: "10-12" }
+const parseScheme = (scheme) => {
+  const [setsPart, repsPart] = scheme.split("×").map(s => s.trim());
+  return { sets: setsPart.split("–").pop(), reps: repsPart.replace("–", "-") };
+};
+const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return toISO(x); };
+const daysBetween = (fromISO, toISO_) => Math.round((new Date(toISO_ + "T00:00:00") - new Date(fromISO + "T00:00:00")) / 86400000);
+
+function PPLProgram({ session, workouts, onLogSession }) {
+  const saved = session?.user?.user_metadata?.ppl;
+  const [settings, setSettings] = useState(saved || null);
+  const [editing, setEditing]   = useState(!saved);
+  const [draft, setDraft]       = useState(saved || { startDate: mondayOf(new Date()), rms: PPL_DEFAULT_RMS });
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [openDay, setOpenDay]   = useState(null);
+  const [guide, setGuide]       = useState(null);
+  const [saving, setSaving]     = useState(false);
+
+  const saveSettings = async () => {
+    setSaving(true);
+    const next = { startDate: draft.startDate, rms: Object.fromEntries(Object.keys(PPL_DEFAULT_RMS).map(k => [k, Number(draft.rms[k]) || 0])) };
+    // Stored on the user's profile so it follows them across devices without a new table
+    await supabase.auth.updateUser({ data: { ppl: next } });
+    setSettings(next); setEditing(false); setWeekOffset(0); setSaving(false);
+  };
+
+  if (editing || !settings) return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 space-y-4">
+      <div>
+        <h2 className="font-bold text-slate-800 text-lg">PPL Hypertrophy Program</h2>
+        <p className="text-sm text-slate-500 mt-1">12 weeks of Push (Mon) · Pull (Wed) · Legs (Fri). Each month cycles Volume → Hypertrophy → Strength → Deload, and core-lift loads rise every month.</p>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-slate-600 mb-1">Start date (week 1, Monday)</label>
+        <input type="date" value={draft.startDate} onChange={e => setDraft(d => ({ ...d, startDate: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {Object.keys(PPL_DEFAULT_RMS).map(k => (
+          <div key={k}>
+            <label className="block text-xs font-medium text-slate-600 mb-1">{PPL_RM_LABELS[k]} 1RM</label>
+            <input type="number" inputMode="numeric" value={draft.rms[k]} onChange={e => setDraft(d => ({ ...d, rms: { ...d.rms, [k]: e.target.value } }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-2">
+        <button onClick={saveSettings} disabled={!draft.startDate || saving} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm disabled:opacity-50">{settings ? "Save" : "Start Program"}</button>
+        {settings && <button onClick={() => { setDraft(settings); setEditing(false); }} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm hover:bg-slate-200">Cancel</button>}
+      </div>
+    </div>
+  );
+
+  const today = todayISO();
+  const currentWeek = Math.floor(daysBetween(settings.startDate, today) / 7);
+  const notStarted = currentWeek < 0, finished = currentWeek >= PPL_WEEKS;
+  const baseWeek = Math.min(Math.max(currentWeek, 0), PPL_WEEKS - 1);
+  const weekIdx = Math.min(Math.max(baseWeek + weekOffset, 0), PPL_WEEKS - 1);
+  const phase = PPL_PHASES[weekIdx % 4];
+  const month = Math.floor(weekIdx / 4) + 1;
+  const weekStart = addDaysISO(settings.startDate, weekIdx * 7);
+  const weekEnd = addDaysISO(weekStart, 6);
+
+  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= weekStart && w.date <= weekEnd);
+  const lastWeightFor = (name) => {
+    const w = workouts.find(w => w.exercises.some(e => normEx(e.name) === normEx(name) && maxWeight(e.weight) > 0));
+    return w ? maxWeight(w.exercises.find(e => normEx(e.name) === normEx(name)).weight) : "";
+  };
+
+  const logSession = (day) => {
+    const tier = (lifts, scheme, weightOf) => lifts.map(l => ({ name: l.name, ...parseScheme(scheme), weight: String(weightOf(l) || ""), notes: "" }));
+    onLogSession({
+      date: today >= weekStart && today <= weekEnd ? today : addDaysISO(weekStart, day.dayOffset),
+      type: day.name,
+      exercises: [
+        ...tier([day.core], phase.core, () => pplCoreLoad(settings.rms, day, weekIdx)).map(e => ({ ...e, notes: `W${weekIdx+1} ${phase.label} · ${phase.rpe}` })),
+        ...tier(day.secondary, phase.sec, l => lastWeightFor(l.name)),
+        ...tier(day.ancillary, phase.anc, l => lastWeightFor(l.name)),
+      ],
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className={`rounded-xl border p-4 ${phase.style}`}>
+        <div className="flex items-center justify-between gap-2">
+          <button onClick={() => setWeekOffset(o => o - 1)} disabled={weekIdx === 0} className="p-2 rounded-lg hover:bg-white/60 disabled:opacity-30"><ChevronLeft size={18}/></button>
+          <div className="text-center flex-1">
+            <p className="text-xs font-semibold uppercase tracking-wide opacity-80">Month {month} · Week {weekIdx+1} of {PPL_WEEKS}</p>
+            <p className="text-xl font-bold">{phase.label} Week</p>
+            <p className="text-xs opacity-80">{phase.rpe} · {isoToLabel(weekStart)} – {isoToLabel(weekEnd)}</p>
+          </div>
+          <button onClick={() => setWeekOffset(o => o + 1)} disabled={weekIdx === PPL_WEEKS - 1} className="p-2 rounded-lg hover:bg-white/60 disabled:opacity-30"><ChevronRight size={18}/></button>
+        </div>
+        <p className="text-sm mt-2 opacity-90 text-center">{phase.desc}</p>
+        <div className="flex gap-1 mt-3">
+          {Array.from({ length: PPL_WEEKS }).map((_, i) => (
+            <button key={i} onClick={() => setWeekOffset(i - baseWeek)} title={`Week ${i+1}`}
+              className={`flex-1 h-2 rounded-full ${PPL_PHASES[i % 4].bar} ${i === weekIdx ? "ring-2 ring-offset-1 ring-slate-700" : i < currentWeek ? "opacity-90" : "opacity-30"}`}/>
+          ))}
+        </div>
+        <div className="flex items-center justify-between mt-3 text-xs">
+          <span className="opacity-80">{notStarted ? `Starts ${isoToLabel(settings.startDate)}` : finished ? "Program complete" : weekOffset !== 0 ? "" : "This week"}</span>
+          <div className="flex gap-3">
+            {weekOffset !== 0 && <button onClick={() => setWeekOffset(0)} className="font-semibold underline">Back to current</button>}
+            <button onClick={() => { setDraft(settings); setEditing(true); }} className="font-semibold flex items-center gap-1"><Settings size={12}/> 1RMs & start</button>
+          </div>
+        </div>
+      </div>
+
+      {finished && weekOffset === 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 text-sm text-emerald-800">
+          You've finished all 12 weeks. Retest your 1RMs and set a new start date to run another block.
+        </div>
+      )}
+
+      {PPL_DAYS.map(day => {
+        const logged = loggedFor(day);
+        const open = openDay === day.id;
+        const tiers = [
+          { label: "Core", scheme: phase.core, lifts: [day.core], tag: "bg-amber-100 text-amber-800" },
+          { label: "Secondary", scheme: phase.sec, lifts: day.secondary, tag: "bg-emerald-100 text-emerald-700" },
+          { label: "Ancillary", scheme: phase.anc, lifts: day.ancillary, tag: "bg-slate-100 text-slate-600" },
+        ];
+        return (
+          <div key={day.id} className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="p-4">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${workoutTypeStyle(day.name)}`}>{day.name}</span>
+                  <span className="text-xs text-slate-400">{day.weekday} · {isoToLabel(addDaysISO(weekStart, day.dayOffset))}</span>
+                </div>
+                {logged
+                  ? <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600"><Check size={13}/> Logged</span>
+                  : <button onClick={() => logSession(day)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold flex items-center gap-1"><Plus size={13}/> Log session</button>}
+              </div>
+              <div className="flex items-baseline justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-slate-800">{day.core.name}</p>
+                  <p className="text-xs text-slate-500">{phase.core}</p>
+                </div>
+                <span className="text-lg font-bold text-blue-700 whitespace-nowrap">{pplCoreLoad(settings.rms, day, weekIdx)} lb</span>
+              </div>
+              <p className="text-xs text-slate-500 mt-2 truncate">{[...day.secondary, ...day.ancillary].map(l => l.name).join(" · ")}</p>
+            </div>
+            <button onClick={() => setOpenDay(open ? null : day.id)} className="w-full flex items-center justify-center gap-1 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 border-t border-slate-100">
+              {open ? "Hide" : "Show"} all lifts & cues {open ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+            </button>
+            {open && (
+              <div className="px-4 pb-4 space-y-4 border-t border-slate-100 pt-3 bg-slate-50">
+                {tiers.map(t => (
+                  <div key={t.label}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${t.tag}`}>{t.label}</span>
+                      <span className="text-xs text-slate-500">{t.scheme}</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {t.lifts.map(l => (
+                        <div key={l.name} className="flex justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-slate-700">{l.name}</p>
+                            <p className="text-xs text-slate-400 italic">{l.cue}</p>
+                          </div>
+                          <span className="text-xs text-slate-400 whitespace-nowrap">Rest {l.rest}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 divide-y divide-slate-100">
+        {[["cycle","The 4-week cycle"],["loads","12-week load table"],["tips","Training tips"]].map(([id, label]) => (
+          <div key={id}>
+            <button onClick={() => setGuide(guide === id ? null : id)} className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-slate-50">
+              <span className="text-sm font-semibold text-slate-700">{label}</span>
+              {guide === id ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
+            </button>
+            {guide === id && id === "cycle" && (
+              <div className="px-4 pb-4 grid grid-cols-2 gap-2">
+                {PPL_PHASES.map((p, i) => (
+                  <div key={p.id} className={`rounded-lg border p-3 ${p.style}`}>
+                    <p className="text-[10px] font-bold uppercase tracking-wide opacity-80">Week {i+1}</p>
+                    <p className="font-bold">{p.label}</p>
+                    <p className="text-xs">{p.rpe} · ~{Math.round(p.pct*100)}% 1RM</p>
+                    <p className="text-xs opacity-80">Core {p.core}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+            {guide === id && id === "loads" && (
+              <div className="px-4 pb-4 overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="text-left text-slate-400 uppercase tracking-wide">
+                      <th className="py-1.5 pr-2 font-semibold">Week</th>
+                      {PPL_DAYS.map(d => <th key={d.id} className="py-1.5 px-1 font-semibold text-right">{PPL_RM_LABELS[d.coreKey]}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: PPL_WEEKS }).map((_, i) => {
+                      const p = PPL_PHASES[i % 4];
+                      return (
+                        <tr key={i} className={`border-t border-slate-100 ${i === weekIdx ? "bg-blue-50 font-semibold" : ""} ${p.id === "dl" ? "text-slate-400" : "text-slate-700"}`}>
+                          <td className="py-1.5 pr-2 whitespace-nowrap">W{i+1} · {p.label}</td>
+                          {PPL_DAYS.map(d => <td key={d.id} className="py-1.5 px-1 text-right">{pplCoreLoad(settings.rms, d, i)} lb</td>)}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p className="text-xs text-slate-400 mt-2">Rounded to 5 lb. Monthly +5 lb bench, +10 lb deadlift and squat. Secondary and ancillary lifts are RPE-based (aim RPE 7–8); Log session pre-fills your last weight for them.</p>
+              </div>
+            )}
+            {guide === id && id === "tips" && (
+              <div className="px-4 pb-4 space-y-3">
+                {PPL_TIPS.map(([t, b]) => (
+                  <div key={t}>
+                    <p className="text-sm font-semibold text-slate-700">{t}</p>
+                    <p className="text-sm text-slate-500">{b}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
-  const isEditing = !!workout;
-  const [exercises, setExercises]   = useState(workout ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
-  const [formDate, setFormDate]     = useState(workout ? workout.date : todayISO());
-  const [formType, setFormType]     = useState(workout ? workout.type : "Push");
+  const isEditing = !!workout?.id;
+  const [exercises, setExercises]   = useState(workout?.exercises?.length ? workout.exercises.map(e => ({ ...e })) : [{ name:"",sets:"",reps:"",weight:"",notes:"" }]);
+  const [formDate, setFormDate]     = useState(workout?.date || todayISO());
+  const [formType, setFormType]     = useState(workout?.type || "Push");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [errors, setErrors]         = useState([]);
 
@@ -1187,20 +1502,18 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
         <Segmented value={section} onChange={setSection}
           options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}]}/>
       </div>
-      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} goals={goals} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}/>}
-      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals}/>}
-      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} dailyTasks={dailyTasks} kanbanCards={kanbanCards}/>}
+      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}/>}
+      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}/>}
+      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}/>}
     </div>
   );
 }
 
-function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, addHabit, deleteHabit }) {
+function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, deleteHabit }) {
   const [viewDate, setViewDate]     = useState(todayISO());
   const [newTaskText, setNewTaskText] = useState("");
-  const [newTaskGoal, setNewTaskGoal] = useState("");
   const [editingTask, setEditingTask] = useState(null);
   const [editText, setEditText] = useState("");
-  const [editGoal, setEditGoal] = useState("");
   const calendarRef = useRef(null);
 
   const tasks = tasksOn(dailyTasks, viewDate);
@@ -1224,13 +1537,13 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
 
   const addTask = () => {
     if (!newTaskText.trim()) return;
-    putTasks([...tasks, { id: Date.now(), text: newTaskText.trim(), status: "pending", goalId: newTaskGoal||null }]);
-    setNewTaskText(""); setNewTaskGoal("");
+    putTasks([...tasks, { id: Date.now(), text: newTaskText.trim(), status: "pending" }]);
+    setNewTaskText("");
   };
 
   const saveTaskEdit = (taskId) => {
     if (!editText.trim()) return;
-    putTasks(tasks.map(t => t.id === taskId ? { ...t, text: editText.trim(), goalId: editGoal || null } : t));
+    putTasks(tasks.map(t => t.id === taskId ? { ...t, text: editText.trim() } : t));
     setEditingTask(null);
   };
 
@@ -1240,13 +1553,6 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
 
   const deleteTask = (taskId) => {
     putTasks(tasks.filter(t=>t.id!==taskId));
-  };
-
-  const goalColor = (goalId) => {
-    if (!goalId) return null;
-    const g = goals.find(g=>g.id===goalId);
-    if (!g) return null;
-    return GOAL_COLORS.find(c=>c.id===g.color)?.hex || "#666";
   };
 
   return (
@@ -1289,8 +1595,6 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
         {tasks.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
         <div className="space-y-2 mb-4">
           {tasks.map(t => {
-            const gc = goalColor(t.goalId);
-            const g  = goals.find(g=>g.id===t.goalId);
             return (
               <div key={t.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-all ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
                 {editingTask === t.id ? (
@@ -1304,16 +1608,6 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
                         className="flex-1 px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500"
                         autoFocus
                       />
-                      {goals.length > 0 && (
-                        <select 
-                          value={editGoal} 
-                          onChange={e => setEditGoal(e.target.value)}
-                          className="px-2 py-1 text-xs border border-slate-200 rounded max-w-[110px]"
-                        >
-                          <option value="">No goal</option>
-                          {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
-                        </select>
-                      )}
                     </div>
                     <button 
                       onClick={() => saveTaskEdit(t.id)}
@@ -1342,12 +1636,10 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
                       <X size={isMobile?15:12}/>
                     </button>
                     <span className={`flex-1 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
-                    {gc && g && <span className="text-xs px-2 py-0.5 rounded-full text-white font-medium flex-shrink-0" style={{background:gc}}>{g.title}</span>}
                     <button
                       onClick={() => {
                         setEditingTask(t.id);
                         setEditText(t.text);
-                        setEditGoal(t.goalId || "");
                       }}
                       className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 flex-shrink-0 touch-manipulation`}
                       title="Edit task"
@@ -1363,12 +1655,6 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, goals, habits, add
         </div>
         <div className="flex gap-2">
           <input value={newTaskText} onChange={e=>setNewTaskText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTask()} placeholder="Add a task" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
-          {goals.length>0 && (
-            <select value={newTaskGoal} onChange={e=>setNewTaskGoal(e.target.value)} className="px-2 py-2 border border-slate-200 rounded-lg text-xs text-slate-600 max-w-[110px]">
-              <option value="">No goal</option>
-              {goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}
-            </select>
-          )}
           <button onClick={addTask} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"><Plus size={16}/></button>
         </div>
       </div>
@@ -1473,53 +1759,47 @@ function HabitManager({ habits, onAdd, onDelete, onDone }) {
   );
 }
 
-function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals }) {
+// Done cards completed before the current two-week bucket (which starts this week's Sunday) are archived.
+const currentBucketStart = () => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return toISO(d); };
+const cardDoneDate = (c) => c.completed_at ? toISO(new Date(c.completed_at)) : (c.due_date || (c.created_at ? toISO(new Date(c.created_at)) : todayISO()));
+const isArchivedCard = (c, bucketStart) => c.status === "done" && cardDoneDate(c) < bucketStart;
+
+function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard }) {
   const [kanbanView, setKanbanView]   = useState("board");
   const [showAddCard, setShowAddCard] = useState(false);
   const [newTitle, setNewTitle]       = useState("");
-  const [newGoal, setNewGoal]         = useState("");
   const [newDue, setNewDue]           = useState("");
   const [newStatus, setNewStatus]     = useState("todo");
   const [editingCard, setEditingCard] = useState(null);
   const [editCardTitle, setEditCardTitle] = useState("");
-  const [editCardGoal, setEditCardGoal] = useState("");
   const [editCardDue, setEditCardDue] = useState("");
-  const [calStart, setCalStart]       = useState(() => {
-    const d = new Date(); d.setDate(d.getDate() - d.getDay()); // Sunday of current week
-    return d.toISOString().split("T")[0];
-  });
+  const [showArchive, setShowArchive] = useState(false);
+  const [calStart, setCalStart]       = useState(currentBucketStart);
   const [calSelectedDay, setCalSelectedDay] = useState(null);
 
-  const calDays14 = Array.from({ length: 14 }, (_, i) => {
-    const d = new Date(calStart + "T00:00:00"); d.setDate(d.getDate() + i);
-    return d.toISOString().split("T")[0];
-  });
+  const calDays14 = Array.from({ length: 14 }, (_, i) => addDaysISO(calStart, i));
   const calEnd = calDays14[13];
-  const shiftCal = (weeks) => {
-    const d = new Date(calStart + "T00:00:00"); d.setDate(d.getDate() + weeks * 7);
-    setCalStart(d.toISOString().split("T")[0]); setCalSelectedDay(null);
-  };
+  const shiftCal = (weeks) => { setCalStart(addDaysISO(calStart, weeks * 7)); setCalSelectedDay(null); };
   const calPeriodCards = kanbanCards.filter(c => c.due_date && c.due_date >= calStart && c.due_date <= calEnd);
   const calDoneCount   = calPeriodCards.filter(c => c.status === "done").length;
 
+  const bucketStart = currentBucketStart();
+  const archivedCards = kanbanCards.filter(c => isArchivedCard(c, bucketStart))
+    .sort((a,b) => cardDoneDate(b).localeCompare(cardDoneDate(a)));
+
   const handleAdd = async () => {
     if (!newTitle.trim()) return;
-    await addKanbanCard({ title: newTitle.trim(), status: newStatus, goal_id: newGoal||null, due_date: newDue||null });
-    setNewTitle(""); setNewGoal(""); setNewDue(""); setNewStatus("todo"); setShowAddCard(false);
+    await addKanbanCard({ title: newTitle.trim(), status: newStatus, due_date: newDue||null, completed_at: newStatus === "done" ? new Date().toISOString() : null });
+    setNewTitle(""); setNewDue(""); setNewStatus("todo"); setShowAddCard(false);
   };
+
+  const moveCard = (card, status) => updateKanbanCard(card.id, { status, completed_at: status === "done" ? new Date().toISOString() : null });
 
   const saveCardEdit = async (cardId) => {
     if (!editCardTitle.trim()) return;
-    await updateKanbanCard(cardId, {
-      title: editCardTitle.trim(),
-      goal_id: editCardGoal || null,
-      due_date: editCardDue || null
-    });
+    await updateKanbanCard(cardId, { title: editCardTitle.trim(), due_date: editCardDue || null });
     setEditingCard(null);
   };
-
-  const goalFor   = (goalId) => goals.find(g=>g.id===goalId);
-  const colorFor  = (goalId) => { const g=goalFor(goalId); if (!g) return null; return GOAL_COLORS.find(c=>c.id===g.color)?.hex||"#666"; };
 
   const dueBadge = (card) => {
     if (!card.due_date) return <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded">No due date</span>;
@@ -1528,16 +1808,45 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
     return <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">{label}</span>;
   };
 
+  const renderCard = (card) => {
+    const status = card.status;
+    const nextStatus = status==="todo"?"inprogress":status==="inprogress"?"done":null;
+    const prevStatus = status==="done"?"inprogress":status==="inprogress"?"todo":null;
+    if (editingCard === card.id) return (
+      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100 space-y-2">
+        <input value={editCardTitle} onChange={e => setEditCardTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && saveCardEdit(card.id)}
+          className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500" placeholder="Card title" autoFocus/>
+        <input type="date" value={editCardDue} onChange={e => setEditCardDue(e.target.value)} className="w-full px-2 py-1 text-sm border border-slate-200 rounded"/>
+        <div className="flex gap-1">
+          <button onClick={() => saveCardEdit(card.id)} className="flex-1 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 font-medium">Save</button>
+          <button onClick={() => setEditingCard(null)} className="flex-1 py-1 text-xs bg-slate-200 text-slate-600 rounded hover:bg-slate-300">Cancel</button>
+        </div>
+      </div>
+    );
+    return (
+      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+        <div className="flex items-start justify-between gap-1 mb-2">
+          <span className={`text-sm font-medium leading-tight flex-1 ${status==="done"?"text-slate-500 line-through":"text-slate-800"}`}>{card.title}</span>
+          <div className="flex gap-0.5 flex-shrink-0">
+            <button onClick={() => { setEditingCard(card.id); setEditCardTitle(card.title); setEditCardDue(card.due_date || ""); }}
+              className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 touch-manipulation`} title="Edit card"><Edit2 size={14}/></button>
+            <button onClick={() => deleteKanbanCard(card.id)}
+              className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 touch-manipulation`} title="Delete card"><Trash2 size={14}/></button>
+          </div>
+        </div>
+        {dueBadge(card)}
+        <div className="flex gap-1 mt-2">
+          {prevStatus && <button onClick={() => moveCard(card, prevStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
+          {nextStatus && <button onClick={() => moveCard(card, nextStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
-      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-        {[{id:"board",label:"Board"},{id:"calendar",label:"2-Week Calendar"}].map(({id,label}) => (
-          <button key={id} onClick={() => setKanbanView(id)}
-            className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${kanbanView===id?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>
-            {label}
-          </button>
-        ))}
-      </div>
+      <Segmented value={kanbanView} onChange={setKanbanView}
+        options={[{id:"board",label:"Board"},{id:"calendar",label:"2-Week Calendar"}]}/>
 
       {kanbanView === "calendar" && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
@@ -1584,17 +1893,12 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
             return (
               <div className="space-y-1.5 border-t border-slate-100 pt-3">
                 <p className="text-xs font-semibold text-slate-500 mb-2">Cards due {isoToLabel(calSelectedDay)}</p>
-                {dayCards.map(card => {
-                  const gc = colorFor(card.goal_id);
-                  const g = goalFor(card.goal_id);
-                  return (
-                    <div key={card.id} className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-100">
-                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS[card.status]}`}>{KANBAN_LABELS[card.status]}</span>
-                      <span className="text-sm text-slate-700 flex-1">{card.title}</span>
-                      {gc && g && <span className="text-xs px-2 py-0.5 rounded-full text-white font-medium flex-shrink-0" style={{background:gc}}>{g.title}</span>}
-                    </div>
-                  );
-                })}
+                {dayCards.map(card => (
+                  <div key={card.id} className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-100">
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS[card.status]}`}>{KANBAN_LABELS[card.status]}</span>
+                    <span className="text-sm text-slate-700 flex-1">{card.title}</span>
+                  </div>
+                ))}
               </div>
             );
           })()}
@@ -1609,14 +1913,10 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h3 className="font-semibold text-slate-800 mb-4">New Card</h3>
           <div className="space-y-3">
-            <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} placeholder="Card title" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
-            <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-3"} gap-2`}>
-              <select value={newStatus} onChange={e=>setNewStatus(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm">
+            <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAdd()} placeholder="Card title" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+            <div className="grid grid-cols-2 gap-2">
+              <select value={newStatus} onChange={e=>setNewStatus(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
                 {KANBAN_STATUSES.map(s=><option key={s} value={s}>{KANBAN_LABELS[s]}</option>)}
-              </select>
-              <select value={newGoal} onChange={e=>setNewGoal(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm">
-                <option value="">No goal</option>
-                {goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}
               </select>
               <input type="date" value={newDue} onChange={e=>setNewDue(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
             </div>
@@ -1629,7 +1929,7 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
       )}
       <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-3"} gap-4`}>
         {KANBAN_STATUSES.map(status => {
-          const cards = kanbanCards.filter(c=>c.status===status);
+          const cards = kanbanCards.filter(c => c.status===status && !isArchivedCard(c, bucketStart));
           return (
             <div key={status} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               <div className={`px-4 py-3 flex items-center justify-between ${KANBAN_COLORS[status]}`}>
@@ -1637,128 +1937,97 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
                 <span className="text-xs font-bold bg-white bg-opacity-60 px-2 py-0.5 rounded-full">{cards.length}</span>
               </div>
               <div className="p-3 space-y-2 min-h-[80px]">
-                {cards.length===0 && <p className="text-xs text-slate-400 text-center py-3">No cards</p>}
-                {cards.map(card => {
-                  const gc = colorFor(card.goal_id);
-                  const g  = goalFor(card.goal_id);
-                  const nextStatus = status==="todo"?"inprogress":status==="inprogress"?"done":null;
-                  const prevStatus = status==="done"?"inprogress":status==="inprogress"?"todo":null;
-                  return (
-                    <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100">
-                      {editingCard === card.id ? (
-                        // EDIT MODE
-                        <div className="space-y-2">
-                          <input 
-                            value={editCardTitle}
-                            onChange={e => setEditCardTitle(e.target.value)}
-                            onKeyDown={e => e.key === "Enter" && saveCardEdit(card.id)}
-                            className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500"
-                            placeholder="Card title"
-                            autoFocus
-                          />
-                          <select 
-                            value={editCardGoal} 
-                            onChange={e => setEditCardGoal(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-slate-200 rounded"
-                          >
-                            <option value="">No goal</option>
-                            {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
-                          </select>
-                          <input 
-                            type="date" 
-                            value={editCardDue} 
-                            onChange={e => setEditCardDue(e.target.value)}
-                            className="w-full px-2 py-1 text-sm border border-slate-200 rounded"
-                          />
-                          <div className="flex gap-1">
-                            <button 
-                              onClick={() => saveCardEdit(card.id)}
-                              className="flex-1 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 font-medium"
-                            >
-                              Save
-                            </button>
-                            <button 
-                              onClick={() => setEditingCard(null)}
-                              className="flex-1 py-1 text-xs bg-slate-200 text-slate-600 rounded hover:bg-slate-300"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        // VIEW MODE
-                        <>
-                          <div className="flex items-start justify-between gap-1 mb-2">
-                            <span className="text-sm font-medium text-slate-800 leading-tight flex-1">{card.title}</span>
-                            <div className="flex gap-0.5 flex-shrink-0">
-                              <button
-                                onClick={() => {
-                                  setEditingCard(card.id);
-                                  setEditCardTitle(card.title);
-                                  setEditCardGoal(card.goal_id || "");
-                                  setEditCardDue(card.due_date || "");
-                                }}
-                                className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 touch-manipulation`}
-                                title="Edit card"
-                              >
-                                <Edit2 size={14}/>
-                              </button>
-                              <button
-                                onClick={()=>deleteKanbanCard(card.id)}
-                                className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 touch-manipulation`}
-                                title="Delete card"
-                              >
-                                <Trash2 size={14}/>
-                              </button>
-                            </div>
-                          </div>
-                          {gc && g && <div className="mb-2"><span className="text-xs px-2 py-0.5 rounded-full text-white font-medium" style={{background:gc}}>{g.title}</span></div>}
-                          {dueBadge(card)}
-                          <div className="flex gap-1 mt-2">
-                            {prevStatus && <button onClick={()=>updateKanbanCard(card.id,{status:prevStatus})} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
-                            {nextStatus && <button onClick={()=>updateKanbanCard(card.id,{status:nextStatus})} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
+                {cards.length===0 && <p className="text-xs text-slate-400 text-center py-3">{status === "done" ? "Nothing done in this two-week window yet" : "No cards"}</p>}
+                {cards.map(renderCard)}
               </div>
             </div>
           );
         })}
       </div>
+      {archivedCards.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <button onClick={() => setShowArchive(a => !a)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 text-left">
+            <span className="text-sm font-semibold text-slate-600">Archived done cards <span className="ml-1 text-xs font-bold bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{archivedCards.length}</span></span>
+            {showArchive ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
+          </button>
+          {showArchive && (
+            <div className="border-t border-slate-100 px-4 py-2 divide-y divide-slate-100">
+              {groupByMonth(archivedCards, c => new Date(cardDoneDate(c) + "T00:00:00")).map(group => (
+                <div key={group.key} className="py-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">{group.label}</p>
+                  {group.items.map(card => (
+                    <div key={card.id} className="flex items-center gap-2 py-1.5">
+                      <Check size={13} className="text-emerald-500 flex-shrink-0"/>
+                      <span className="flex-1 text-sm text-slate-600 truncate">{card.title}</span>
+                      <span className="text-xs text-slate-400 flex-shrink-0">{isoToLabel(cardDoneDate(card))}</span>
+                      <button onClick={() => moveCard(card, "inprogress")} className="text-xs text-blue-500 hover:text-blue-700 font-medium flex-shrink-0">Reopen</button>
+                      <button onClick={() => deleteKanbanCard(card.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete card"><Trash2 size={13}/></button>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       </>}
     </div>
   );
 }
 
-function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanbanCards }) {
+// Each goal picks how its progress is tracked; milestones is the only type so far.
+const GOAL_TRACKING_TYPES = [
+  { id: "milestones", label: "Milestones checklist" },
+];
+const goalProgress = (g) => {
+  const ms = g.milestones || [];
+  const done = ms.filter(m => m.done).length;
+  return { done, total: ms.length, pct: ms.length ? Math.round(done / ms.length * 100) : 0, complete: ms.length > 0 && done === ms.length };
+};
+const newMilestone = (text) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, text, done: false });
+
+function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
   const [showForm, setShowForm]     = useState(false);
   const [editGoal, setEditGoal]     = useState(null);
   const [title, setTitle]           = useState("");
   const [desc, setDesc]             = useState("");
   const [color, setColor]           = useState("blue");
+  const [trackingType, setTrackingType] = useState("milestones");
+  const [milestones, setMilestones] = useState([]);
+  const [milestoneInput, setMilestoneInput] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
+  const [quickAdd, setQuickAdd]     = useState({});
 
-  const openNew  = () => { setTitle(""); setDesc(""); setColor("blue"); setEditGoal(null); setShowForm(true); };
-  const openEdit = (g) => { setTitle(g.title); setDesc(g.description||""); setColor(g.color); setEditGoal(g); setShowForm(true); };
+  const openNew  = () => { setTitle(""); setDesc(""); setColor("blue"); setTrackingType("milestones"); setMilestones([]); setMilestoneInput(""); setEditGoal(null); setShowForm(true); };
+  const openEdit = (g) => { setTitle(g.title); setDesc(g.description||""); setColor(g.color); setTrackingType(g.tracking_type || "milestones"); setMilestones((g.milestones || []).map(m => ({ ...m }))); setMilestoneInput(""); setEditGoal(g); setShowForm(true); };
   const cancel   = () => { setShowForm(false); setEditGoal(null); };
+
+  const addFormMilestone = () => {
+    const text = milestoneInput.trim();
+    if (!text) return;
+    setMilestones([...milestones, newMilestone(text)]);
+    setMilestoneInput("");
+  };
 
   const save = async () => {
     if (!title.trim()) return;
-    if (editGoal) await updateGoal(editGoal.id, { title: title.trim(), description: desc.trim(), color });
-    else await addGoal({ title: title.trim(), description: desc.trim(), color });
+    // Keep a milestone typed but not yet added with Enter
+    const finalMilestones = milestoneInput.trim() ? [...milestones, newMilestone(milestoneInput.trim())] : milestones;
+    const fields = { title: title.trim(), description: desc.trim(), color, tracking_type: trackingType, milestones: finalMilestones.filter(m => m.text.trim()) };
+    if (editGoal) await updateGoal(editGoal.id, fields);
+    else await addGoal(fields);
     cancel();
   };
 
-  const goalStats = (goalId) => {
-    const allTasks = Object.values(dailyTasks).flatMap(d => d.tasks||[]).filter(t=>t.goalId===goalId);
-    const done     = allTasks.filter(t=>t.status==="complete").length;
-    const kanban   = kanbanCards.filter(c=>c.goal_id===goalId);
-    const kDone    = kanban.filter(c=>c.status==="done").length;
-    return { dailyTotal: allTasks.length, dailyDone: done, kanbanTotal: kanban.length, kanbanDone: kDone };
+  const toggleMilestone = (g, id) => updateGoal(g.id, { milestones: (g.milestones || []).map(m => m.id === id ? { ...m, done: !m.done, done_at: m.done ? null : new Date().toISOString() } : m) });
+  const quickAddMilestone = (g) => {
+    const text = (quickAdd[g.id] || "").trim();
+    if (!text) return;
+    updateGoal(g.id, { milestones: [...(g.milestones || []), newMilestone(text)] });
+    setQuickAdd(q => ({ ...q, [g.id]: "" }));
   };
+
+  const sortedGoals = [...goals].sort((a,b) => Number(goalProgress(a).complete) - Number(goalProgress(b).complete));
 
   return (
     <div className="space-y-4">
@@ -1766,11 +2035,36 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
         <Plus size={16}/> Create Goal
       </button>
       {showForm && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-semibold text-slate-800 mb-4">{editGoal?"Edit Goal":"New Goal"}</h3>
-          <div className="space-y-3">
+        <Sheet title={editGoal ? "Edit Goal" : "New Goal"} onClose={cancel} closeOnBackdrop={false}>
+          <div className="space-y-4">
             <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Goal title" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
             <textarea value={desc} onChange={e=>setDesc(e.target.value)} placeholder="Description (optional)" rows={2} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none"/>
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Track progress by</label>
+              <select value={trackingType} onChange={e => setTrackingType(e.target.value)} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
+                {GOAL_TRACKING_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </select>
+            </div>
+            {trackingType === "milestones" && (
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Milestones</label>
+                <div className="space-y-1.5 mb-2">
+                  {milestones.map((m, i) => (
+                    <div key={m.id} className="flex items-center gap-2">
+                      <span className="text-xs text-slate-400 w-4 text-right">{i+1}.</span>
+                      <input value={m.text} onChange={e => setMilestones(milestones.map(x => x.id === m.id ? { ...x, text: e.target.value } : x))}
+                        className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm"/>
+                      <button onClick={() => setMilestones(milestones.filter(x => x.id !== m.id))} className="p-1 text-slate-300 hover:text-red-400" aria-label="Remove milestone"><X size={14}/></button>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <input value={milestoneInput} onChange={e => setMilestoneInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addFormMilestone(); } }}
+                    placeholder="Add a milestone, then Enter" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+                  <button onClick={addFormMilestone} disabled={!milestoneInput.trim()} className="px-3 py-2 bg-slate-800 text-white rounded-lg text-sm disabled:opacity-40"><Plus size={16}/></button>
+                </div>
+              </div>
+            )}
             <div>
               <p className="text-xs font-medium text-slate-600 mb-2">Color</p>
               <div className="flex gap-2 flex-wrap">
@@ -1784,29 +2078,28 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
               <button onClick={cancel} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm hover:bg-slate-200">Cancel</button>
             </div>
           </div>
-        </div>
+        </Sheet>
       )}
       {goals.length===0 && !showForm && (
         <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
           <Flag size={32} className="text-slate-300 mx-auto mb-3"/>
-          <p className="text-slate-500 text-sm">No goals yet. Create one to start tagging tasks.</p>
+          <p className="text-slate-500 text-sm">No goals yet. Create one and break it into milestones.</p>
         </div>
       )}
-      {goals.map(g => {
-        const gc    = GOAL_COLORS.find(c=>c.id===g.color)?.hex || "#666";
-        const stats = goalStats(g.id);
-        const dailyPct  = stats.dailyTotal  ? Math.round(stats.dailyDone/stats.dailyTotal*100)  : 0;
-        const kanbanPct = stats.kanbanTotal ? Math.round(stats.kanbanDone/stats.kanbanTotal*100) : 0;
+      {sortedGoals.map(g => {
+        const gc = GOAL_COLORS.find(c=>c.id===g.color)?.hex || "#666";
+        const prog = goalProgress(g);
         return (
-          <div key={g.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div key={g.id} className={`bg-white rounded-xl border border-slate-200 overflow-hidden ${prog.complete ? "opacity-75" : ""}`}>
             <div className="h-1.5" style={{background:gc}}/>
             <div className="p-5">
               <div className="flex items-start justify-between mb-1">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <div className="w-3 h-3 rounded-full flex-shrink-0" style={{background:gc}}/>
-                  <h3 className="font-bold text-slate-800">{g.title}</h3>
+                  <h3 className="font-bold text-slate-800 truncate">{g.title}</h3>
+                  {prog.complete && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex-shrink-0">Complete</span>}
                 </div>
-                <div className="flex gap-1">
+                <div className="flex gap-1 flex-shrink-0">
                   <button onClick={()=>openEdit(g)} className="text-xs px-2 py-1 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={13}/></button>
                   {confirmDelete===g.id
                     ? <><button onClick={()=>{ deleteGoal(g.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600">Delete</button><button onClick={()=>setConfirmDelete(null)} className="text-xs px-2 py-1 bg-slate-100 rounded">Cancel</button></>
@@ -1814,20 +2107,29 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, dailyTasks, kanb
                   }
                 </div>
               </div>
-              {g.description && <p className="text-sm text-slate-500 mb-4 ml-5">{g.description}</p>}
-              <div className="grid grid-cols-2 gap-3 mt-3">
-                <div className="bg-slate-50 rounded-lg p-3">
-                  <p className="text-xs font-medium text-slate-500 mb-1">Daily Tasks</p>
-                  <p className="text-lg font-bold text-slate-800">{stats.dailyDone}<span className="text-sm font-normal text-slate-400">/{stats.dailyTotal}</span></p>
-                  <div className="h-1.5 bg-slate-200 rounded-full mt-2 overflow-hidden"><div className="h-full rounded-full transition-all" style={{width:`${dailyPct}%`,background:gc}}/></div>
-                  <p className="text-xs text-slate-400 mt-1">{dailyPct}% complete</p>
+              {g.description && <p className="text-sm text-slate-500 ml-5">{g.description}</p>}
+              <div className="mt-4">
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="font-medium text-slate-500">{prog.total ? `${prog.done} of ${prog.total} milestones` : "No milestones yet"}</span>
+                  <span className="font-bold text-slate-700">{prog.pct}%</span>
                 </div>
-                <div className="bg-slate-50 rounded-lg p-3">
-                  <p className="text-xs font-medium text-slate-500 mb-1">Kanban Cards</p>
-                  <p className="text-lg font-bold text-slate-800">{stats.kanbanDone}<span className="text-sm font-normal text-slate-400">/{stats.kanbanTotal}</span></p>
-                  <div className="h-1.5 bg-slate-200 rounded-full mt-2 overflow-hidden"><div className="h-full rounded-full transition-all" style={{width:`${kanbanPct}%`,background:gc}}/></div>
-                  <p className="text-xs text-slate-400 mt-1">{kanbanPct}% done</p>
-                </div>
+                <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all" style={{width:`${prog.pct}%`,background:gc}}/></div>
+              </div>
+              <div className="mt-3 space-y-1">
+                {(g.milestones || []).map(m => (
+                  <button key={m.id} onClick={() => toggleMilestone(g, m.id)} className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
+                    <div className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 transition-all ${m.done ? "border-transparent" : "border-slate-300 bg-white"}`} style={m.done ? {background:gc} : undefined}>
+                      {m.done && <Check size={12} className="text-white" strokeWidth={3}/>}
+                    </div>
+                    <span className={`flex-1 text-sm ${m.done ? "line-through text-slate-400" : "text-slate-700"}`}>{m.text}</span>
+                    {m.done && m.done_at && <span className="text-xs text-slate-400">{isoToLabel(toISO(new Date(m.done_at)))}</span>}
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-2 mt-2">
+                <input value={quickAdd[g.id] || ""} onChange={e => setQuickAdd(q => ({ ...q, [g.id]: e.target.value }))} onKeyDown={e => e.key === "Enter" && quickAddMilestone(g)}
+                  placeholder="Add milestone" className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm"/>
+                <button onClick={() => quickAddMilestone(g)} disabled={!(quickAdd[g.id] || "").trim()} className="px-2.5 py-1.5 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 disabled:opacity-40"><Plus size={15}/></button>
               </div>
             </div>
           </div>
@@ -1876,16 +2178,11 @@ function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
       return { label: new Date(ds+"T00:00:00").toLocaleDateString("en-US",{weekday:"short"}), done, total: dt.length, rate: dt.length > 0 ? Math.round((done/dt.length)*100) : null };
     });
 
-    const byGoal = goals.map(goal => ({
-      goal: goal.title, color: goal.color,
-      count: completed.filter(t => t.goalId === goal.id).length
-    }));
 
-    const kanbanFiltered = !cutoff ? kanbanCards : kanbanCards.filter(c => !c.updated_at || c.updated_at.slice(0,10) >= cutoff);
-    const kanbanDone = kanbanFiltered.filter(c => c.status === "done" && c.due_date);
+    const kanbanDone = kanbanCards.filter(c => c.status === "done" && c.due_date && c.completed_at && (!cutoff || toISO(new Date(c.completed_at)) >= cutoff));
     let early = 0, ontime = 0, late = 0;
     kanbanDone.forEach(card => {
-      const diff = Math.floor((new Date(card.updated_at) - new Date(card.due_date + "T00:00:00")) / 86400000);
+      const diff = Math.floor((new Date(toISO(new Date(card.completed_at)) + "T00:00:00") - new Date(card.due_date + "T00:00:00")) / 86400000);
       if (diff < 0) early++; else if (diff === 0) ontime++; else late++;
     });
 
@@ -1899,10 +2196,10 @@ function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
       return { id: h.id, name: h.name, done, days, rate: days ? Math.round(done/days*100) : 0, streak: habitStreak(dailyTasks, h.id, today) };
     });
 
-    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, byGoal, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7, habitStats };
+    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7, habitStats };
   })();
 
-  if (stats.total === 0 && kanbanCards.length === 0 && habits.length === 0) return null;
+  if (stats.total === 0 && kanbanCards.length === 0 && habits.length === 0 && goals.length === 0) return null;
 
   const maxLast7 = Math.max(...stats.last7.map(d => d.total), 1);
 
@@ -1997,17 +2294,20 @@ function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
           </div>
         </div>
       )}
-      {stats.byGoal.filter(g => g.count > 0).length > 0 && (
+      {goals.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Completed Tasks by Goal</h3>
-          <div className="space-y-2">
-            {stats.byGoal.filter(g => g.count > 0).sort((a,b) => b.count-a.count).map(({goal, color, count}) => {
-              const hex = GOAL_COLORS.find(c => c.id === color)?.hex || "#666";
+          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Flag size={15} className="text-blue-500"/> Goal Progress</h3>
+          <div className="space-y-3">
+            {goals.map(g => {
+              const hex = GOAL_COLORS.find(c => c.id === g.color)?.hex || "#666";
+              const prog = goalProgress(g);
               return (
-                <div key={goal} className="flex items-center gap-3">
-                  <div className="w-3 h-3 rounded-full flex-shrink-0" style={{background:hex}}/>
-                  <span className="flex-1 text-sm text-slate-700">{goal}</span>
-                  <span className="text-sm font-bold text-slate-800">{count}</span>
+                <div key={g.id}>
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className="flex items-center gap-2 font-medium text-slate-700"><span className="w-2.5 h-2.5 rounded-full" style={{background:hex}}/>{g.title}</span>
+                    <span className="text-xs text-slate-500">{prog.done}/{prog.total} milestones</span>
+                  </div>
+                  <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{width:`${prog.pct}%`,background:hex}}/></div>
                 </div>
               );
             })}
