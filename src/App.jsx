@@ -271,6 +271,11 @@ export default function App() {
 
   const signOut = () => supabase.auth.signOut();
 
+  const changeTab = (id) => {
+    if (id !== tab) window.scrollTo(0, 0);
+    setTab(id);
+  };
+
   if (loading) return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center">
       <div className="text-slate-400 text-sm">Loading</div>
@@ -288,30 +293,45 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+      <header className="bg-white/95 backdrop-blur border-b border-slate-200 sticky top-0 z-40 shadow-sm pt-safe">
+        <div className={`max-w-4xl mx-auto px-4 ${isMobile ? "py-2.5" : "py-3"} flex items-center justify-between`}>
           <div className="flex items-center gap-2">
-            <Dumbbell className="text-blue-600" size={28} />
-            <span className="font-bold text-xl text-slate-900">MindFit</span>
+            <Dumbbell className="text-blue-600" size={isMobile ? 22 : 28} />
+            {isMobile
+              ? <span className="font-bold text-lg text-slate-900">{TABS.find(t => t.id === tab)?.label}</span>
+              : <span className="font-bold text-xl text-slate-900">MindFit</span>}
           </div>
-          <button onClick={signOut} className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-700 px-2 py-1.5 rounded-lg hover:bg-slate-100 transition-colors">
-            <LogOut size={14} /> Sign out
+          <button onClick={signOut} className={`flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors ${isMobile ? "p-2.5" : "px-2 py-1.5"}`} aria-label="Sign out">
+            <LogOut size={isMobile ? 18 : 14} />{!isMobile && " Sign out"}
           </button>
         </div>
-        <div className="max-w-4xl mx-auto px-4">
+        {!isMobile && (
+          <div className="max-w-4xl mx-auto px-4">
+            <div className="flex">
+              {TABS.map(({ id, label, icon: Icon }) => (
+                <button key={id} onClick={() => changeTab(id)}
+                  className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${tab===id?"border-blue-600 text-blue-600":"border-transparent text-slate-500 hover:text-slate-700"}`}>
+                  <Icon size={15} />{label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </header>
+      {isMobile && (
+        <nav className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 pb-safe">
           <div className="flex">
             {TABS.map(({ id, label, icon: Icon }) => (
-              <button key={id} onClick={() => setTab(id)}
-                className={`flex items-center gap-1.5 ${isMobile?"flex-1 justify-center px-2 py-3.5":"px-4 py-3"} text-sm font-medium border-b-2 transition-colors touch-manipulation ${tab===id?"border-blue-600 text-blue-600":"border-transparent text-slate-500 hover:text-slate-700"}`}>
-                <Icon size={isMobile?18:15} />
-                {!isMobile && label}
-                {isMobile && <span className="text-xs">{label}</span>}
+              <button key={id} onClick={() => changeTab(id)}
+                className={`flex-1 flex flex-col items-center gap-0.5 pt-2 pb-1.5 min-h-[56px] touch-manipulation ${tab===id ? "text-blue-600" : "text-slate-400"}`}>
+                <Icon size={22} strokeWidth={tab===id ? 2.4 : 2} />
+                <span className="text-[11px] font-medium">{label}</span>
               </button>
             ))}
           </div>
-        </div>
-      </header>
-      <main className="max-w-4xl mx-auto px-4 py-6">
+        </nav>
+      )}
+      <main className={`max-w-4xl mx-auto px-4 ${isMobile ? "pt-4 pb-nav" : "py-6"}`}>
         {tab === "tasks"    && (
           <TasksTab
             isMobile={isMobile}
@@ -346,12 +366,12 @@ function Sheet({ title, onClose, closeOnBackdrop = true, children }) {
   }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-slate-900/40 md:p-4" onClick={() => closeOnBackdrop && onClose()}>
-      <div className="bg-white w-full md:max-w-lg max-h-[92vh] overflow-y-auto rounded-t-2xl md:rounded-2xl shadow-xl" onClick={e => e.stopPropagation()}>
+      <div className="bg-white w-full md:max-w-lg max-h-[92vh] max-h-[92dvh] overflow-y-auto overscroll-contain rounded-t-2xl md:rounded-2xl shadow-xl" onClick={e => e.stopPropagation()}>
         <div className="sticky top-0 z-10 bg-white flex items-center justify-between px-5 py-4 border-b border-slate-100">
           <h3 className="text-lg font-bold text-slate-900">{title}</h3>
           <button onClick={onClose} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100" aria-label="Close"><X size={20}/></button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="p-5 pb-safe"><div className="pb-5">{children}</div></div>
       </div>
     </div>
   );
@@ -1029,7 +1049,7 @@ function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
                     className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"
                   />
                   {arr.length > 1 && (
-                    <button type="button" onClick={() => updateEx(idx, { weight: weightsOf(ex).filter((_,i)=>i!==wi).join(",") })} className="px-2 py-1 text-slate-400 hover:text-red-500 text-lg leading-none">×</button>
+                    <button type="button" onClick={() => updateEx(idx, { weight: weightsOf(ex).filter((_,i)=>i!==wi).join(",") })} className="px-3 py-2 text-slate-400 hover:text-red-500 text-lg leading-none" aria-label="Remove set weight">×</button>
                   )}
                 </div>
               ))}
@@ -1438,7 +1458,7 @@ function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
             {tags.map(tag => (
               <span key={tag} className="flex items-center gap-1 pl-3 pr-1.5 py-1 rounded-full text-xs font-semibold bg-violet-600 text-white">
                 {tag}
-                <button onClick={() => setTags(tags.filter(t => t !== tag))} className="p-0.5 rounded-full hover:bg-violet-500" aria-label={`Remove ${tag}`}><X size={12}/></button>
+                <button onClick={() => setTags(tags.filter(t => t !== tag))} className="p-1 -my-0.5 rounded-full hover:bg-violet-500" aria-label={`Remove ${tag}`}><X size={12}/></button>
               </span>
             ))}
           </div>
@@ -1593,60 +1613,59 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
           )}
         </div>
         {tasks.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
+        {isMobile && tasks.length>0 && <p className="text-xs text-slate-400 -mt-2 mb-3">Tap a task to edit, skip or delete it.</p>}
         <div className="space-y-2 mb-4">
           {tasks.map(t => {
             return (
               <div key={t.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-all ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
                 {editingTask === t.id ? (
-                  // EDIT MODE
-                  <>
-                    <div className="flex items-center gap-2 flex-1">
-                      <input 
+                  // EDIT MODE (on mobile this also holds skip and delete)
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <input
                         value={editText}
                         onChange={e => setEditText(e.target.value)}
                         onKeyDown={e => e.key === "Enter" && saveTaskEdit(t.id)}
-                        className="flex-1 px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500"
+                        className="flex-1 min-w-0 px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500"
                         autoFocus
                       />
+                      <button onClick={() => saveTaskEdit(t.id)} className={`${isMobile?"p-2":""} text-emerald-600 hover:text-emerald-700 flex-shrink-0`} title="Save"><Check size={isMobile?18:14}/></button>
+                      <button onClick={() => setEditingTask(null)} className={`${isMobile?"p-2":""} text-slate-400 hover:text-slate-600 flex-shrink-0`} title="Cancel"><X size={isMobile?18:14}/></button>
                     </div>
-                    <button 
-                      onClick={() => saveTaskEdit(t.id)}
-                      className="text-emerald-600 hover:text-emerald-700 flex-shrink-0"
-                      title="Save"
-                    >
-                      <Check size={14}/>
-                    </button>
-                    <button 
-                      onClick={() => setEditingTask(null)}
-                      className="text-slate-400 hover:text-slate-600 flex-shrink-0"
-                      title="Cancel"
-                    >
-                      <X size={14}/>
-                    </button>
-                  </>
+                    {isMobile && (
+                      <div className="flex gap-2 mt-2">
+                        <button onClick={() => { setStatus(t.id, t.status==="skipped"?"pending":"skipped"); setEditingTask(null); }}
+                          className="flex-1 py-2 text-sm font-medium rounded-lg bg-slate-100 text-slate-600">{t.status==="skipped" ? "Unskip" : "Skip today"}</button>
+                        <button onClick={() => { deleteTask(t.id); setEditingTask(null); }}
+                          className="flex-1 py-2 text-sm font-medium rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center gap-1"><Trash2 size={14}/> Delete</button>
+                      </div>
+                    )}
+                  </div>
                 ) : (
                   // VIEW MODE
                   <>
-                    <button onClick={()=>setStatus(t.id,t.status==="complete"?"pending":"complete")}
+                    <button onClick={()=>setStatus(t.id,t.status==="complete"?"pending":"complete")} aria-label="Complete"
                       className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${t.status==="complete"?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
                       <Check size={isMobile?15:12}/>
                     </button>
-                    <button onClick={()=>setStatus(t.id,t.status==="skipped"?"pending":"skipped")}
-                      className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${t.status==="skipped"?"bg-slate-400 border-slate-400 text-white":"border-slate-300 text-slate-300 hover:border-slate-400 hover:text-slate-500"}`}>
-                      <X size={isMobile?15:12}/>
-                    </button>
-                    <span className={`flex-1 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
-                    <button
-                      onClick={() => {
-                        setEditingTask(t.id);
-                        setEditText(t.text);
-                      }}
-                      className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 flex-shrink-0 touch-manipulation`}
-                      title="Edit task"
-                    >
-                      <Edit2 size={14}/>
-                    </button>
-                    <button onClick={()=>deleteTask(t.id)} className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 flex-shrink-0 touch-manipulation`} title="Delete task"><Trash2 size={14}/></button>
+                    {!isMobile && (
+                      <button onClick={()=>setStatus(t.id,t.status==="skipped"?"pending":"skipped")} aria-label="Skip"
+                        className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 border transition-all ${t.status==="skipped"?"bg-slate-400 border-slate-400 text-white":"border-slate-300 text-slate-300 hover:border-slate-400 hover:text-slate-500"}`}>
+                        <X size={12}/>
+                      </button>
+                    )}
+                    {isMobile ? (
+                      <button onClick={() => { setEditingTask(t.id); setEditText(t.text); }} className="flex-1 min-w-0 text-left py-1 touch-manipulation">
+                        <span className={`text-base ${t.status!=="pending"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
+                        {t.status==="skipped" && <span className="ml-2 text-xs text-slate-400">skipped</span>}
+                      </button>
+                    ) : (
+                      <>
+                        <span className={`flex-1 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
+                        <button onClick={() => { setEditingTask(t.id); setEditText(t.text); }} className="p-0.5 text-slate-300 hover:text-blue-600 flex-shrink-0" title="Edit task"><Edit2 size={14}/></button>
+                        <button onClick={()=>deleteTask(t.id)} className="p-0.5 text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete task"><Trash2 size={14}/></button>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -1748,7 +1767,7 @@ function HabitManager({ habits, onAdd, onDelete, onDone }) {
                   <button onClick={() => setConfirmDelete(null)} className="text-xs px-2 py-1 bg-slate-200 text-slate-600 rounded font-semibold">No</button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmDelete(habit.id)} className="text-slate-300 hover:text-rose-400"><X size={15}/></button>
+                <button onClick={() => setConfirmDelete(habit.id)} className="p-2 -m-2 text-slate-300 hover:text-rose-400" aria-label={`Remove ${habit.name}`}><X size={16}/></button>
               )}
             </div>
           ))}
@@ -1774,6 +1793,7 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
   const [editCardTitle, setEditCardTitle] = useState("");
   const [editCardDue, setEditCardDue] = useState("");
   const [showArchive, setShowArchive] = useState(false);
+  const [mobileColumn, setMobileColumn] = useState("todo");
   const [calStart, setCalStart]       = useState(currentBucketStart);
   const [calSelectedDay, setCalSelectedDay] = useState(null);
 
@@ -1845,8 +1865,22 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
 
   return (
     <div className="space-y-4">
-      <Segmented value={kanbanView} onChange={setKanbanView}
-        options={[{id:"board",label:"Board"},{id:"calendar",label:"2-Week Calendar"}]}/>
+      <div className="flex gap-2">
+        {kanbanView === "board" && (
+          <button onClick={()=>setShowAddCard(!showAddCard)} className="flex-1 py-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-900 flex items-center justify-center gap-2 text-sm font-medium">
+            <Plus size={16}/> Add Card
+          </button>
+        )}
+        {kanbanView === "calendar" && <p className="flex-1 self-center text-sm font-semibold text-slate-700">Due dates · 2 weeks</p>}
+        <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+          {[{id:"board",icon:CheckSquare,label:"Board"},{id:"calendar",icon:Calendar,label:"Calendar"}].map(({id,icon:Icon,label}) => (
+            <button key={id} onClick={() => setKanbanView(id)} aria-label={label} title={label}
+              className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium transition-all ${kanbanView===id?"bg-white shadow text-slate-900":"text-slate-500"}`}>
+              <Icon size={16}/>{!isMobile && label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {kanbanView === "calendar" && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
@@ -1906,9 +1940,6 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
       )}
 
       {kanbanView === "board" && <>
-      <button onClick={()=>setShowAddCard(!showAddCard)} className="w-full py-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-900 flex items-center justify-center gap-2 text-sm font-medium">
-        <Plus size={16}/> Add Kanban Card
-      </button>
       {showAddCard && (
         <div className="bg-white rounded-xl border border-slate-200 p-5">
           <h3 className="font-semibold text-slate-800 mb-4">New Card</h3>
@@ -1927,15 +1958,31 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
           </div>
         </div>
       )}
+      {isMobile && (
+        <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+          {KANBAN_STATUSES.map(status => {
+            const count = kanbanCards.filter(c => c.status===status && !isArchivedCard(c, bucketStart)).length;
+            return (
+              <button key={status} onClick={() => setMobileColumn(status)}
+                className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5 transition-all ${mobileColumn===status?"bg-white shadow text-slate-900":"text-slate-500"}`}>
+                {KANBAN_LABELS[status]}
+                <span className={`text-xs font-bold px-1.5 rounded-full ${mobileColumn===status ? KANBAN_COLORS[status] : "bg-slate-200 text-slate-500"}`}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
       <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-3"} gap-4`}>
-        {KANBAN_STATUSES.map(status => {
+        {KANBAN_STATUSES.filter(status => !isMobile || status === mobileColumn).map(status => {
           const cards = kanbanCards.filter(c => c.status===status && !isArchivedCard(c, bucketStart));
           return (
             <div key={status} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-              <div className={`px-4 py-3 flex items-center justify-between ${KANBAN_COLORS[status]}`}>
-                <span className="font-semibold text-sm">{KANBAN_LABELS[status]}</span>
-                <span className="text-xs font-bold bg-white bg-opacity-60 px-2 py-0.5 rounded-full">{cards.length}</span>
-              </div>
+              {!isMobile && (
+                <div className={`px-4 py-3 flex items-center justify-between ${KANBAN_COLORS[status]}`}>
+                  <span className="font-semibold text-sm">{KANBAN_LABELS[status]}</span>
+                  <span className="text-xs font-bold bg-white bg-opacity-60 px-2 py-0.5 rounded-full">{cards.length}</span>
+                </div>
+              )}
               <div className="p-3 space-y-2 min-h-[80px]">
                 {cards.length===0 && <p className="text-xs text-slate-400 text-center py-3">{status === "done" ? "Nothing done in this two-week window yet" : "No cards"}</p>}
                 {cards.map(renderCard)}
@@ -1960,8 +2007,8 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
                       <Check size={13} className="text-emerald-500 flex-shrink-0"/>
                       <span className="flex-1 text-sm text-slate-600 truncate">{card.title}</span>
                       <span className="text-xs text-slate-400 flex-shrink-0">{isoToLabel(cardDoneDate(card))}</span>
-                      <button onClick={() => moveCard(card, "inprogress")} className="text-xs text-blue-500 hover:text-blue-700 font-medium flex-shrink-0">Reopen</button>
-                      <button onClick={() => deleteKanbanCard(card.id)} className="text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete card"><Trash2 size={13}/></button>
+                      <button onClick={() => moveCard(card, "inprogress")} className="text-xs text-blue-500 hover:text-blue-700 font-medium flex-shrink-0 px-2 py-2">Reopen</button>
+                      <button onClick={() => deleteKanbanCard(card.id)} className="p-2 -mr-2 text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete card"><Trash2 size={15}/></button>
                     </div>
                   ))}
                 </div>
@@ -2054,7 +2101,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
                       <span className="text-xs text-slate-400 w-4 text-right">{i+1}.</span>
                       <input value={m.text} onChange={e => setMilestones(milestones.map(x => x.id === m.id ? { ...x, text: e.target.value } : x))}
                         className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm"/>
-                      <button onClick={() => setMilestones(milestones.filter(x => x.id !== m.id))} className="p-1 text-slate-300 hover:text-red-400" aria-label="Remove milestone"><X size={14}/></button>
+                      <button onClick={() => setMilestones(milestones.filter(x => x.id !== m.id))} className="p-2 text-slate-300 hover:text-red-400" aria-label="Remove milestone"><X size={16}/></button>
                     </div>
                   ))}
                 </div>
@@ -2100,10 +2147,10 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
                   {prog.complete && <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 flex-shrink-0">Complete</span>}
                 </div>
                 <div className="flex gap-1 flex-shrink-0">
-                  <button onClick={()=>openEdit(g)} className="text-xs px-2 py-1 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded"><Edit2 size={13}/></button>
+                  <button onClick={()=>openEdit(g)} className="p-2 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg" aria-label="Edit goal"><Edit2 size={15}/></button>
                   {confirmDelete===g.id
                     ? <><button onClick={()=>{ deleteGoal(g.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-red-500 text-white rounded hover:bg-red-600">Delete</button><button onClick={()=>setConfirmDelete(null)} className="text-xs px-2 py-1 bg-slate-100 rounded">Cancel</button></>
-                    : <button onClick={()=>setConfirmDelete(g.id)} className="text-xs px-2 py-1 text-slate-500 hover:text-red-500 hover:bg-red-50 rounded"><Trash2 size={13}/></button>
+                    : <button onClick={()=>setConfirmDelete(g.id)} className="p-2 text-slate-500 hover:text-red-500 hover:bg-red-50 rounded-lg" aria-label="Delete goal"><Trash2 size={15}/></button>
                   }
                 </div>
               </div>
