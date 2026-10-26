@@ -5,18 +5,16 @@ import { supabase } from "./supabase.js";
 //  Constants 
 const SEED_TAGS = ["work","sleep","family","stress","exercise","diet","social","health","rest","travel","focus","anxiety","tired","motivated","productive","grateful","overwhelmed","calm","lonely","connected","sick","energy","outdoors","creative","frustrated"];
 
-// One rainbow step per score, red (1) through violet (8); fg is the text color that reads on bg
+// Mood scale keeps its original colors (green high, red low) regardless of the app theme.
+// Solid swatches are the original shades; text/light/border are those hues tuned to read on navy.
 const MOOD_SPECTRUM = [
-  { bg: "bg-rose-500",    text: "text-rose-400",    light: "bg-rose-100",    border: "border-rose-300",    hex: "#f43f5e", fg: "text-white"    },
-  { bg: "bg-orange-400",  text: "text-orange-400",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c", fg: "text-navy-950" },
-  { bg: "bg-yellow-400",  text: "text-yellow-400",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15", fg: "text-navy-950" },
-  { bg: "bg-lime-400",    text: "text-lime-400",    light: "bg-lime-100",    border: "border-lime-300",    hex: "#a3e635", fg: "text-navy-950" },
-  { bg: "bg-emerald-400", text: "text-emerald-400", light: "bg-emerald-100", border: "border-emerald-300", hex: "#34d399", fg: "text-navy-950" },
-  { bg: "bg-cyan-400",    text: "text-cyan-400",    light: "bg-cyan-100",    border: "border-cyan-300",    hex: "#22d3ee", fg: "text-navy-950" },
-  { bg: "bg-blue-500",    text: "text-blue-400",    light: "bg-blue-100",    border: "border-blue-300",    hex: "#3b82f6", fg: "text-white"    },
-  { bg: "bg-violet-500",  text: "text-violet-400",  light: "bg-violet-100",  border: "border-violet-300",  hex: "#8b5cf6", fg: "text-white"    },
+  { min: 8, bg: "bg-emerald-600", text: "text-emerald-400", light: "bg-emerald-100", border: "border-emerald-300", hex: "#059669", fg: "text-white" },
+  { min: 6, bg: "bg-emerald-400", text: "text-emerald-300", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399", fg: "text-white" },
+  { min: 4, bg: "bg-yellow-400",  text: "text-yellow-400",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15", fg: "text-white" },
+  { min: 2, bg: "bg-orange-400",  text: "text-orange-400",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c", fg: "text-white" },
+  { min: 0, bg: "bg-rose-600",    text: "text-rose-400",    light: "bg-rose-100",    border: "border-rose-300",    hex: "#e11d48", fg: "text-white" },
 ];
-const MOOD_COLORS = (score) => MOOD_SPECTRUM[Math.min(8, Math.max(1, Math.round(Number(score) || 1))) - 1];
+const MOOD_COLORS = (score) => MOOD_SPECTRUM.find(c => score >= c.min) || MOOD_SPECTRUM[MOOD_SPECTRUM.length - 1];
 
 const GOAL_COLORS = [
   { id: "rose",    hex: "#f43f5e", label: "Red"     },
@@ -1281,7 +1279,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
           </div>
           <div className="flex items-center justify-center gap-1.5 mt-4 pt-4 border-t border-slate-100 flex-wrap">
             <span className="text-xs text-slate-400 mr-1">Low</span>
-            {MOOD_SPECTRUM.map((c, i) => <div key={i} className={`w-4 h-3 rounded ${c.bg}`}/>)}
+            {[1,2,4,6,8].map(n => <div key={n} className={`w-5 h-3 rounded ${MOOD_COLORS(n).bg}`}/>)}
             <span className="text-xs text-slate-400 ml-1">High</span>
             <span className="text-xs text-slate-400 ml-4">✓ tasks done</span>
           </div>
@@ -2506,10 +2504,10 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
             <div className="absolute left-0 top-0 bottom-0 w-8 flex flex-col justify-between text-xs text-slate-300 text-right pr-1"><span>8</span><span>4</span><span>1</span></div>
             <div className="ml-10 h-full relative">
               <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{overflow:"visible"}}>
-                {/* Line takes the color of the mood it passes through: violet at 8 down to red at 1 */}
+                {/* Line takes the color of the mood it passes through, top (8) to bottom (1) */}
                 <defs>
                   <linearGradient id="moodSpectrum" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
-                    {[...MOOD_SPECTRUM].reverse().map((c, i) => <stop key={i} offset={`${(i/7)*100}%`} stopColor={c.hex}/>)}
+                    {[8,7,6,5,4,3,2,1].map((n, i) => <stop key={n} offset={`${(i/7)*100}%`} stopColor={MOOD_COLORS(n).hex}/>)}
                   </linearGradient>
                 </defs>
                 <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x},${y}`; }).join(" ")} fill="none" stroke="url(#moodSpectrum)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
