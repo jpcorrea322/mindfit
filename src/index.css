@@ -6,11 +6,22 @@
   html {
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
+    color-scheme: dark;
   }
   body {
-    @apply bg-slate-50;
+    background-color: theme("colors.navy.950");
+    color: theme("colors.navy.200");
+    font-feature-settings: "tnum" 1;
+    letter-spacing: -0.01em;
     overscroll-behavior-y: none;
   }
+  h1, h2, h3 { letter-spacing: -0.02em; }
+  input, select, textarea {
+    background-color: theme("colors.navy.950");
+    color: theme("colors.navy.100");
+  }
+  input::placeholder, textarea::placeholder { color: theme("colors.navy.500"); }
+  input:disabled, textarea:disabled { opacity: 0.6; }
   /* iOS Safari zooms into any focused field under 16px */
   @media (max-width: 767px) {
     input, select, textarea { font-size: 16px !important; }
@@ -23,4 +34,8 @@
   .pb-nav  { padding-bottom: calc(5rem + env(safe-area-inset-bottom)); }
   .no-scrollbar { scrollbar-width: none; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
+  /* Full-spectrum accents */
+  .bg-rainbow   { background-image: linear-gradient(90deg, #f43f5e, #fb923c, #facc15, #4ade80, #22d3ee, #3b82f6, #a855f7); }
+  .text-rainbow { background-image: linear-gradient(90deg, #f43f5e, #fb923c, #facc15, #4ade80, #22d3ee, #3b82f6, #a855f7); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .bg-app       { background-color: theme("colors.navy.950"); background-image: radial-gradient(1200px 600px at 10% -10%, rgb(59 130 246 / 0.12), transparent 60%), radial-gradient(900px 500px at 110% 10%, rgb(168 85 247 / 0.10), transparent 60%); background-attachment: fixed; }
 }

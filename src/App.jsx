@@ -5,23 +5,27 @@ import { supabase } from "./supabase.js";
 //  Constants 
 const SEED_TAGS = ["work","sleep","family","stress","exercise","diet","social","health","rest","travel","focus","anxiety","tired","motivated","productive","grateful","overwhelmed","calm","lonely","connected","sick","energy","outdoors","creative","frustrated"];
 
-const MOOD_COLORS = (score) => {
-  if (score >= 8) return { bg: "bg-emerald-600", text: "text-emerald-700", light: "bg-emerald-100", border: "border-emerald-300", hex: "#059669" };
-  if (score >= 6) return { bg: "bg-emerald-400", text: "text-emerald-600", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399" };
-  if (score >= 4) return { bg: "bg-yellow-400",  text: "text-yellow-700", light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15" };
-  if (score >= 2) return { bg: "bg-orange-400",  text: "text-orange-700", light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c" };
-  return              { bg: "bg-rose-600",    text: "text-rose-700",   light: "bg-rose-100",    border: "border-rose-300",    hex: "#e11d48" };
-};
+// Mood scale keeps its original colors (green high, red low) regardless of the app theme.
+// Solid swatches are the original shades; text/light/border are those hues tuned to read on navy.
+const MOOD_SPECTRUM = [
+  { min: 8, bg: "bg-emerald-600", text: "text-emerald-400", light: "bg-emerald-100", border: "border-emerald-300", hex: "#059669", fg: "text-white" },
+  { min: 6, bg: "bg-emerald-400", text: "text-emerald-300", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399", fg: "text-white" },
+  { min: 4, bg: "bg-yellow-400",  text: "text-yellow-400",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15", fg: "text-white" },
+  { min: 2, bg: "bg-orange-400",  text: "text-orange-400",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c", fg: "text-white" },
+  { min: 0, bg: "bg-rose-600",    text: "text-rose-400",    light: "bg-rose-100",    border: "border-rose-300",    hex: "#e11d48", fg: "text-white" },
+];
+const MOOD_COLORS = (score) => MOOD_SPECTRUM.find(c => score >= c.min) || MOOD_SPECTRUM[MOOD_SPECTRUM.length - 1];
 
 const GOAL_COLORS = [
+  { id: "rose",    hex: "#f43f5e", label: "Red"     },
+  { id: "amber",   hex: "#fb923c", label: "Orange"  },
+  { id: "yellow",  hex: "#facc15", label: "Yellow"  },
+  { id: "emerald", hex: "#4ade80", label: "Green"   },
+  { id: "cyan",    hex: "#22d3ee", label: "Cyan"    },
   { id: "blue",    hex: "#3b82f6", label: "Blue"    },
-  { id: "violet",  hex: "#7c3aed", label: "Violet"  },
-  { id: "rose",    hex: "#e11d48", label: "Rose"    },
-  { id: "amber",   hex: "#d97706", label: "Amber"   },
-  { id: "emerald", hex: "#059669", label: "Green"   },
-  { id: "cyan",    hex: "#0891b2", label: "Cyan"    },
-  { id: "fuchsia", hex: "#c026d3", label: "Fuchsia" },
-  { id: "slate",   hex: "#475569", label: "Slate"   },
+  { id: "violet",  hex: "#a855f7", label: "Violet"  },
+  { id: "fuchsia", hex: "#ec4899", label: "Pink"    },
+  { id: "slate",   hex: "#7c8bb3", label: "Slate"   },
 ];
 
 const KANBAN_STATUSES = ["todo", "inprogress", "done"];
@@ -76,11 +80,12 @@ function AuthScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8 w-full max-w-sm">
+    <div className="min-h-screen bg-app flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8 w-full max-w-sm relative overflow-hidden">
+        <div className="absolute inset-x-0 top-0 h-1 bg-rainbow"/>
         <div className="flex items-center gap-2 mb-6 justify-center">
-          <Dumbbell className="text-blue-600" size={28} />
-          <span className="font-bold text-2xl text-slate-900">MindFit</span>
+          <Dumbbell className="text-cyan-400" size={28} />
+          <span className="font-bold text-2xl text-rainbow">MindFit</span>
         </div>
         <div className="flex gap-1 bg-slate-100 p-1 rounded-xl mb-6">
           {["login","signup"].map(m => (
@@ -277,7 +282,7 @@ export default function App() {
   };
 
   if (loading) return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center">
+    <div className="min-h-screen bg-app flex items-center justify-center">
       <div className="text-slate-400 text-sm">Loading</div>
     </div>
   );
@@ -285,21 +290,21 @@ export default function App() {
   if (!session) return <AuthScreen />;
 
   const TABS = [
-    { id: "tasks",    label: "Tasks",    icon: Target    },
-    { id: "workouts", label: "Workouts", icon: Dumbbell  },
-    { id: "mood",     label: "Mood",     icon: Heart     },
-    { id: "insights", label: "Insights", icon: BarChart3 },
+    { id: "tasks",    label: "Tasks",    icon: Target,    accent: "text-cyan-400",   bar: "border-cyan-400"   },
+    { id: "workouts", label: "Workouts", icon: Dumbbell,  accent: "text-orange-400", bar: "border-orange-400" },
+    { id: "mood",     label: "Mood",     icon: Heart,     accent: "text-pink-400",   bar: "border-pink-400"   },
+    { id: "insights", label: "Insights", icon: BarChart3, accent: "text-violet-400", bar: "border-violet-400" },
   ];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50">
-      <header className="bg-white/95 backdrop-blur border-b border-slate-200 sticky top-0 z-40 shadow-sm pt-safe">
+    <div className="min-h-screen bg-app">
+      <header className="bg-navy-950/85 backdrop-blur border-b border-slate-100 sticky top-0 z-40 pt-safe">
         <div className={`max-w-4xl mx-auto px-4 ${isMobile ? "py-2.5" : "py-3"} flex items-center justify-between`}>
           <div className="flex items-center gap-2">
-            <Dumbbell className="text-blue-600" size={isMobile ? 22 : 28} />
+            <Dumbbell className={TABS.find(t => t.id === tab)?.accent} size={isMobile ? 22 : 28} />
             {isMobile
               ? <span className="font-bold text-lg text-slate-900">{TABS.find(t => t.id === tab)?.label}</span>
-              : <span className="font-bold text-xl text-slate-900">MindFit</span>}
+              : <span className="font-bold text-xl text-rainbow">MindFit</span>}
           </div>
           <button onClick={signOut} className={`flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors ${isMobile ? "p-2.5" : "px-2 py-1.5"}`} aria-label="Sign out">
             <LogOut size={isMobile ? 18 : 14} />{!isMobile && " Sign out"}
@@ -308,22 +313,24 @@ export default function App() {
         {!isMobile && (
           <div className="max-w-4xl mx-auto px-4">
             <div className="flex">
-              {TABS.map(({ id, label, icon: Icon }) => (
+              {TABS.map(({ id, label, icon: Icon, accent, bar }) => (
                 <button key={id} onClick={() => changeTab(id)}
-                  className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${tab===id?"border-blue-600 text-blue-600":"border-transparent text-slate-500 hover:text-slate-700"}`}>
+                  className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${tab===id?`${bar} ${accent}`:"border-transparent text-slate-500 hover:text-slate-700"}`}>
                   <Icon size={15} />{label}
                 </button>
               ))}
             </div>
           </div>
         )}
+        <div className="h-0.5 bg-rainbow opacity-80"/>
       </header>
       {isMobile && (
-        <nav className="fixed bottom-0 inset-x-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 pb-safe">
+        <nav className="fixed bottom-0 inset-x-0 z-40 bg-navy-950/90 backdrop-blur border-t border-slate-100 pb-safe">
+          <div className="h-0.5 bg-rainbow opacity-60"/>
           <div className="flex">
-            {TABS.map(({ id, label, icon: Icon }) => (
+            {TABS.map(({ id, label, icon: Icon, accent }) => (
               <button key={id} onClick={() => changeTab(id)}
-                className={`flex-1 flex flex-col items-center gap-0.5 pt-2 pb-1.5 min-h-[56px] touch-manipulation ${tab===id ? "text-blue-600" : "text-slate-400"}`}>
+                className={`flex-1 flex flex-col items-center gap-0.5 pt-2 pb-1.5 min-h-[56px] touch-manipulation ${tab===id ? accent : "text-slate-400"}`}>
                 <Icon size={22} strokeWidth={tab===id ? 2.4 : 2} />
                 <span className="text-[11px] font-medium">{label}</span>
               </button>
@@ -1154,6 +1161,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
   const [detailDate, setDetailDate]     = useState(null);
   const [view, setView]                 = useState("calendar");
   const [calendarDate, setCalendarDate] = useState(new Date());
+  const [selectedDate, setSelectedDate] = useState(() => addDaysISO(todayISO(), -1));
   const [visibleCount, setVisibleCount] = useState(14);
 
   const uid = session?.user?.id;
@@ -1199,17 +1207,13 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
 
   const todayEntry = entryByDate[todayStr];
 
-  const openDay = (isoDate) => {
-    if (entryByDate[isoDate]) setDetailDate(isoDate);
-    else setFormEntry({ date: isoDate });
-  };
 
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
         {todayEntry ? (
           <div className="flex items-center gap-4">
-            <div className={`w-14 h-14 rounded-full ${MOOD_COLORS(todayEntry.mood).bg} flex items-center justify-center text-white font-bold text-2xl flex-shrink-0`}>{todayEntry.mood}</div>
+            <div className={`w-14 h-14 rounded-full ${MOOD_COLORS(todayEntry.mood).bg} ${MOOD_COLORS(todayEntry.mood).fg} flex items-center justify-center font-bold text-2xl flex-shrink-0`}>{todayEntry.mood}</div>
             <div className="flex-1 min-w-0">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Today</p>
               <p className={`font-bold ${MOOD_COLORS(todayEntry.mood).text}`}>{moodLabel(todayEntry.mood)}</p>
@@ -1224,7 +1228,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
             <div className="flex gap-1.5">
               {[1,2,3,4,5,6,7,8].map(n => (
                 <button key={n} onClick={() => setFormEntry({ date: todayStr, mood: n })}
-                  className={`flex-1 py-3 rounded-lg text-sm font-bold ${MOOD_COLORS(n).light} ${MOOD_COLORS(n).text} hover:brightness-95 hover:scale-105 transition-all touch-manipulation`}>
+                  className={`flex-1 py-3 rounded-lg text-sm font-bold ${MOOD_COLORS(n).light} ${MOOD_COLORS(n).text} hover:brightness-125 hover:scale-105 transition-all touch-manipulation`}>
                   {n}
                 </button>
               ))}
@@ -1257,15 +1261,17 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
               const entry = entryByDate[isoDate];
               const isToday = isoDate === todayStr;
               const isFuture = isoDate > todayStr;
+              const isSelected = isoDate === selectedDate;
               const dayTasks = tasksOn(dailyTasks, isoDate);
               const taskDone = dayTasks.filter(t => t.status === "complete").length;
               return (
-                <button key={day} onClick={() => openDay(isoDate)} disabled={isFuture}
+                <button key={day} onClick={() => setSelectedDate(isoDate)} disabled={isFuture}
                   className={`aspect-square rounded-lg flex flex-col items-center justify-center transition-all touch-manipulation
-                    ${entry ? `${MOOD_COLORS(entry.mood).bg} text-white hover:opacity-90` : isToday ? "border-2 border-violet-400 text-violet-600 hover:bg-violet-50" : isFuture ? "text-slate-300 cursor-default" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}`}>
+                    ${entry ? `${MOOD_COLORS(entry.mood).bg} ${MOOD_COLORS(entry.mood).fg} hover:brightness-110` : isToday ? "border-2 border-violet-400 text-violet-600 hover:bg-violet-50" : isFuture ? "text-slate-300 cursor-default" : "bg-slate-50 text-slate-600 hover:bg-slate-100"}
+                    ${isSelected ? "ring-2 ring-slate-800 ring-offset-2" : ""}`}>
                   <span className="text-sm font-semibold">{day}</span>
                   {dayTasks.length > 0 && (
-                    <span className={`text-[9px] leading-none mt-0.5 font-medium ${entry ? "text-white/80" : "text-slate-400"}`}>✓{taskDone}/{dayTasks.length}</span>
+                    <span className={`text-[9px] leading-none mt-0.5 font-semibold ${entry ? "opacity-75" : "text-slate-400"}`}>✓{taskDone}/{dayTasks.length}</span>
                   )}
                 </button>
               );
@@ -1273,11 +1279,17 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
           </div>
           <div className="flex items-center justify-center gap-1.5 mt-4 pt-4 border-t border-slate-100 flex-wrap">
             <span className="text-xs text-slate-400 mr-1">Low</span>
-            {[1,2,4,6,8].map(s => <div key={s} className={`w-5 h-3 rounded ${MOOD_COLORS(s).bg}`}/>)}
+            {[1,2,4,6,8].map(n => <div key={n} className={`w-5 h-3 rounded ${MOOD_COLORS(n).bg}`}/>)}
             <span className="text-xs text-slate-400 ml-1">High</span>
             <span className="text-xs text-slate-400 ml-4">✓ tasks done</span>
           </div>
         </div>
+      )}
+
+      {view === "calendar" && selectedDate && (
+        <DayPanel iso={selectedDate} entry={entryByDate[selectedDate]} dailyTasks={dailyTasks} habits={habits}
+          onDetails={() => setDetailDate(selectedDate)}
+          onCheckIn={() => setFormEntry(entryByDate[selectedDate] || { date: selectedDate })}/>
       )}
 
       {view === "history" && (
@@ -1298,7 +1310,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
                       return (
                         <button key={entry.id} onClick={() => setDetailDate(entry.date)}
                           className="w-full flex items-start gap-3 p-3 rounded-lg hover:bg-slate-50 transition-colors text-left">
-                          <div className={`w-10 h-10 rounded-full ${colors.bg} flex items-center justify-center text-white font-bold text-lg flex-shrink-0`}>{entry.mood}</div>
+                          <div className={`w-10 h-10 rounded-full ${colors.bg} ${colors.fg} flex items-center justify-center font-bold text-lg flex-shrink-0`}>{entry.mood}</div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between gap-2">
                               <span className="font-semibold text-slate-700 text-sm">{isoToLong(entry.date)}</span>
@@ -1347,13 +1359,10 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
 
 function DayDetail({ entry, onEdit, onClose, habits, dailyTasks }) {
   const colors = MOOD_COLORS(entry.mood);
-  const dayTasks = tasksOn(dailyTasks, entry.date);
-  const tasksDone = dayTasks.filter(t => t.status === "complete").length;
-  const doneHabitIds = habitsDoneOn(dailyTasks, entry.date);
   return (
     <Sheet title={isoToLong(entry.date)} onClose={onClose}>
       <div className="flex items-center gap-3 mb-4">
-        <div className={`w-12 h-12 rounded-full ${colors.bg} flex items-center justify-center text-white text-xl font-bold`}>{entry.mood}</div>
+        <div className={`w-12 h-12 rounded-full ${colors.bg} ${colors.fg} flex items-center justify-center text-xl font-bold`}>{entry.mood}</div>
         <p className={`flex-1 font-semibold ${colors.text}`}>{moodLabel(entry.mood)}</p>
         <button onClick={() => onEdit(entry)} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex items-center gap-1"><Edit2 size={13}/> Edit</button>
       </div>
@@ -1372,25 +1381,90 @@ function DayDetail({ entry, onEdit, onClose, habits, dailyTasks }) {
       </div>
       {(entry.tags||[]).length > 0 && <div className="flex gap-2 flex-wrap mb-4">{entry.tags.map(tag => <span key={tag} className={`px-3 py-1 rounded-full text-sm font-medium ${colors.light} ${colors.text}`}>{tag}</span>)}</div>}
       {entry.note && <div className="bg-slate-50 rounded-lg p-3 mb-4"><p className="text-sm text-slate-600 italic">"{entry.note}"</p></div>}
-      {(dayTasks.length > 0 || habits.length > 0) && (
-        <div className="border-t border-slate-100 pt-4">
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">From your Tasks</p>
-          {dayTasks.length > 0 && <p className="text-sm text-slate-600 mb-2"><strong className="text-slate-800">{tasksDone}/{dayTasks.length}</strong> tasks completed</p>}
-          {habits.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {habits.map(h => {
-                const done = doneHabitIds.has(h.id);
-                return (
-                  <span key={h.id} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${done ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-50 text-slate-400 border-slate-200"}`}>
-                    {done ? <Check size={11}/> : <X size={11}/>} {h.name}
-                  </span>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
+      <div className="border-t border-slate-100 pt-4">
+        <DayTasks iso={entry.date} dailyTasks={dailyTasks} habits={habits}/>
+      </div>
     </Sheet>
+  );
+}
+
+const TASK_STATUS_STYLES = {
+  complete: { icon: Check, dot: "bg-emerald-500 text-navy-950", text: "text-slate-700" },
+  skipped:  { icon: X,     dot: "bg-slate-200 text-slate-500",  text: "text-slate-400 line-through" },
+  pending:  { icon: null,  dot: "border-2 border-amber-400",    text: "text-slate-700" },
+};
+
+// A day's tasks and habit check-offs from the Tasks tab, read-only
+function DayTasks({ iso, dailyTasks, habits }) {
+  const dayTasks = tasksOn(dailyTasks, iso);
+  const tasksDone = dayTasks.filter(t => t.status === "complete").length;
+  const doneHabitIds = habitsDoneOn(dailyTasks, iso);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">Tasks</p>
+        {dayTasks.length > 0 && <span className="text-xs text-slate-500"><strong className="text-slate-800">{tasksDone}/{dayTasks.length}</strong> done</span>}
+      </div>
+      {dayTasks.length === 0
+        ? <p className="text-sm text-slate-400">No tasks logged for this day.</p>
+        : (
+          <ul className="space-y-1.5">
+            {dayTasks.map(t => {
+              const st = TASK_STATUS_STYLES[t.status] || TASK_STATUS_STYLES.pending;
+              const Icon = st.icon;
+              return (
+                <li key={t.id} className="flex items-start gap-2.5">
+                  <span className={`mt-0.5 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${st.dot}`}>{Icon && <Icon size={10} strokeWidth={3}/>}</span>
+                  <span className="text-sm"><span className={st.text}>{t.text}</span>{t.status === "skipped" && <span className="ml-1.5 text-xs text-slate-400">skipped</span>}</span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      {habits.length > 0 && (
+        <>
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-4 mb-2">Habits</p>
+          <div className="flex flex-wrap gap-2">
+            {habits.map(h => {
+              const done = doneHabitIds.has(h.id);
+              return (
+                <span key={h.id} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${done ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-slate-50 text-slate-400 border-slate-200"}`}>
+                  {done ? <Check size={11}/> : <X size={11}/>} {h.name}
+                </span>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// Summary of the day picked on the mood calendar: its check-in plus what got done
+function DayPanel({ iso, entry, dailyTasks, habits, onDetails, onCheckIn }) {
+  const today = todayISO();
+  const rel = iso === today ? "Today" : iso === addDaysISO(today, -1) ? "Yesterday" : null;
+  const colors = entry ? MOOD_COLORS(entry.mood) : null;
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+      <div className="flex items-center gap-3 mb-4">
+        {entry
+          ? <button onClick={onDetails} className={`w-11 h-11 rounded-full ${colors.bg} ${colors.fg} flex items-center justify-center font-bold text-lg flex-shrink-0`} aria-label="Check-in details">{entry.mood}</button>
+          : <div className="w-11 h-11 rounded-full border-2 border-dashed border-slate-300 flex items-center justify-center text-slate-400 flex-shrink-0"><SmilePlus size={18}/></div>}
+        <div className="flex-1 min-w-0">
+          {rel && <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">{rel}</p>}
+          <p className="font-bold text-slate-800">{isoToLong(iso)}</p>
+          {entry ? <p className={`text-xs font-medium ${colors.text}`}>{moodLabel(entry.mood)}</p> : <p className="text-xs text-slate-400">No check-in</p>}
+        </div>
+        {entry
+          ? <button onClick={onDetails} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex-shrink-0">Details</button>
+          : <button onClick={onCheckIn} className="px-3 py-1.5 text-sm bg-violet-50 text-violet-600 rounded-lg hover:bg-violet-100 font-medium flex items-center gap-1 flex-shrink-0"><Plus size={13}/> Check in</button>}
+      </div>
+      {entry && <div className="-mt-2 mb-4"><MetricPills entry={entry}/></div>}
+      <div className="border-t border-slate-100 pt-4">
+        <DayTasks iso={iso} dailyTasks={dailyTasks} habits={habits}/>
+      </div>
+    </div>
   );
 }
 
@@ -1405,7 +1479,7 @@ function ScaleInput({ metric, value, onChange }) {
       <div className="flex gap-1.5">
         {[1,2,3,4,5,6,7,8].map(n => {
           const c = metricColors(metric, n);
-          return <button key={n} onClick={() => onChange(n)} className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all touch-manipulation ${value===n?`${c.bg} text-white shadow-md scale-105`:"bg-slate-100 text-slate-400 hover:bg-slate-200"}`}>{n}</button>;
+          return <button key={n} onClick={() => onChange(n)} className={`flex-1 py-2.5 rounded-lg text-sm font-bold transition-all touch-manipulation ${value===n?`${c.bg} ${c.fg} shadow-md scale-105`:"bg-slate-100 text-slate-400 hover:bg-slate-200"}`}>{n}</button>;
         })}
       </div>
     </div>
@@ -2281,11 +2355,11 @@ function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
             <div key={i} className="flex-1 flex flex-col items-center gap-1">
               <div className="w-full flex flex-col justify-end" style={{height:"56px"}}>
                 {total > 0 ? (
-                  <div className="w-full rounded-t overflow-hidden" style={{height:`${Math.max((total/maxLast7)*56, 8)}px`, background:"#e2e8f0"}}>
+                  <div className="w-full rounded-t overflow-hidden" style={{height:`${Math.max((total/maxLast7)*56, 8)}px`, background:"#22305a"}}>
                     <div className="w-full rounded-t bg-emerald-500 transition-all" style={{height:`${rate}%`}}/>
                   </div>
                 ) : (
-                  <div className="w-full rounded-t" style={{height:"4px", background:"#f1f5f9"}}/>
+                  <div className="w-full rounded-t" style={{height:"4px", background:"#18233f"}}/>
                 )}
               </div>
               <span className="text-xs text-slate-400">{label}</span>
@@ -2430,7 +2504,13 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
             <div className="absolute left-0 top-0 bottom-0 w-8 flex flex-col justify-between text-xs text-slate-300 text-right pr-1"><span>8</span><span>4</span><span>1</span></div>
             <div className="ml-10 h-full relative">
               <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{overflow:"visible"}}>
-                <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x},${y}`; }).join(" ")} fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
+                {/* Line takes the color of the mood it passes through, top (8) to bottom (1) */}
+                <defs>
+                  <linearGradient id="moodSpectrum" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+                    {[8,7,6,5,4,3,2,1].map((n, i) => <stop key={n} offset={`${(i/7)*100}%`} stopColor={MOOD_COLORS(n).hex}/>)}
+                  </linearGradient>
+                </defs>
+                <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x},${y}`; }).join(" ")} fill="none" stroke="url(#moodSpectrum)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
               </svg>
               {timeline.map((e,i) => {
                 const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; const colors=MOOD_COLORS(e.mood);
