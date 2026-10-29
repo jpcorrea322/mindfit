@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History } from "lucide-react";
+import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History, GripVertical } from "lucide-react";
 import { supabase } from "./supabase.js";
 
 //  Constants 
@@ -1608,7 +1608,10 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
   const [newTaskText, setNewTaskText] = useState("");
   const [editingTask, setEditingTask] = useState(null);
   const [editText, setEditText] = useState("");
+  const [dragId, setDragId]       = useState(null);
+  const [dragOrder, setDragOrder] = useState(null); // task ids in their in-progress order while dragging
   const calendarRef = useRef(null);
+  const rowRefs = useRef({});
 
   const tasks = tasksOn(dailyTasks, viewDate);
   const habitItems = (dailyTasks[viewDate]?.tasks || []).filter(t => t.habitId);
@@ -1649,6 +1652,35 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
     putTasks(tasks.filter(t=>t.id!==taskId));
   };
 
+  // Drag to reorder: the grip captures the pointer, the dragged task slots in after every row whose midpoint it passes,
+  // and the new order is saved on release.
+  const shownTasks = dragOrder ? dragOrder.map(id => tasks.find(t => t.id === id)).filter(Boolean) : tasks;
+  const startDrag = (e, taskId) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setEditingTask(null);
+    setDragId(taskId);
+    setDragOrder(tasks.map(t => t.id));
+  };
+  const moveDrag = (e) => {
+    if (dragId === null) return;
+    const others = dragOrder.filter(id => id !== dragId);
+    const idx = others.filter(id => { const r = rowRefs.current[id]?.getBoundingClientRect(); return r && e.clientY > r.top + r.height / 2; }).length;
+    const next = [...others.slice(0, idx), dragId, ...others.slice(idx)];
+    if (next.join() !== dragOrder.join()) setDragOrder(next);
+  };
+  const endDrag = (save) => {
+    if (save && dragOrder && dragOrder.join() !== tasks.map(t => t.id).join()) putTasks(shownTasks);
+    setDragId(null);
+    setDragOrder(null);
+  };
+  const moveTaskBy = (taskId, delta) => {
+    const i = tasks.findIndex(t => t.id === taskId), j = i + delta;
+    if (i < 0 || j < 0 || j >= tasks.length) return;
+    const next = [...tasks]; [next[i], next[j]] = [next[j], next[i]];
+    putTasks(next);
+  };
+
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
@@ -1687,11 +1719,12 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
           )}
         </div>
         {tasks.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
-        {isMobile && tasks.length>0 && <p className="text-xs text-slate-400 -mt-2 mb-3">Tap a task to edit, skip or delete it.</p>}
+        {isMobile && tasks.length>0 && <p className="text-xs text-slate-400 -mt-2 mb-3">Tap a task to edit, skip or delete it. Drag the handle to reorder.</p>}
         <div className="space-y-2 mb-4">
-          {tasks.map(t => {
+          {shownTasks.map(t => {
             return (
-              <div key={t.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-all ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
+              <div key={t.id} ref={el => { rowRefs.current[t.id] = el; }}
+                className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-colors ${dragId===t.id?"ring-2 ring-blue-400 shadow-lg relative z-10":""} ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
                 {editingTask === t.id ? (
                   // EDIT MODE (on mobile this also holds skip and delete)
                   <div className="flex-1 min-w-0">
@@ -1718,6 +1751,15 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                 ) : (
                   // VIEW MODE
                   <>
+                    {tasks.length > 1 && (
+                      <button aria-label="Drag to reorder" title="Drag to reorder"
+                        onPointerDown={e => startDrag(e, t.id)} onPointerMove={moveDrag}
+                        onPointerUp={() => endDrag(true)} onPointerCancel={() => endDrag(false)}
+                        onKeyDown={e => { if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); moveTaskBy(t.id, e.key === "ArrowUp" ? -1 : 1); } }}
+                        className={`${isMobile?"-ml-1 p-1":"-ml-1"} text-slate-300 hover:text-slate-500 flex-shrink-0 touch-none select-none ${dragId===t.id?"cursor-grabbing":"cursor-grab"}`}>
+                        <GripVertical size={isMobile?18:14}/>
+                      </button>
+                    )}
                     <button onClick={()=>setStatus(t.id,t.status==="complete"?"pending":"complete")} aria-label="Complete"
                       className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${t.status==="complete"?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
                       <Check size={isMobile?15:12}/>
