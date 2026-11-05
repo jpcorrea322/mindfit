@@ -54,7 +54,6 @@ const habitStreak  = (dailyTasks, habitId, fromISO) => {
   return streak;
 };
 
-const fmtDisplay = (iso) => { const [y,m,d] = iso.split("-"); return `${parseInt(m)}/${parseInt(d)}/${y}`; };
 const isoToLabel = (iso) => { if (!iso) return ""; const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
 //  Auth Screen 
@@ -556,7 +555,7 @@ function WorkoutsTab({ session, isMobile }) {
       <Segmented value={view} onChange={setView}
         options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp},{id:"program",label:"Program",icon:Calendar}]}/>
 
-      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout}/>}
+      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout} onUnlog={deleteWorkout}/>}
 
       {view === "history" && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
@@ -776,13 +775,14 @@ const parseScheme = (scheme) => {
 const mondayOf = (d) => { const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return toISO(x); };
 const daysBetween = (fromISO, toISO_) => Math.round((new Date(toISO_ + "T00:00:00") - new Date(fromISO + "T00:00:00")) / 86400000);
 
-function PPLProgram({ session, workouts, onLogSession }) {
+function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
   const saved = session?.user?.user_metadata?.ppl;
   const [settings, setSettings] = useState(saved || null);
   const [editing, setEditing]   = useState(!saved);
   const [draft, setDraft]       = useState(saved || { startDate: mondayOf(new Date()), rms: PPL_DEFAULT_RMS });
   const [weekOffset, setWeekOffset] = useState(0);
   const [openDay, setOpenDay]   = useState(null);
+  const [confirmUnlog, setConfirmUnlog] = useState(null); // day id awaiting "remove this logged session?"
   const [guide, setGuide]       = useState(null);
   const [saving, setSaving]     = useState(false);
 
@@ -898,9 +898,20 @@ function PPLProgram({ session, workouts, onLogSession }) {
                   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${workoutTypeStyle(day.name)}`}>{day.name}</span>
                   <span className="text-xs text-slate-400">{day.weekday} · {isoToLabel(addDaysISO(weekStart, day.dayOffset))}</span>
                 </div>
-                {logged
-                  ? <span className="flex items-center gap-1 text-xs font-semibold text-emerald-600"><Check size={13}/> Logged</span>
-                  : <button onClick={() => logSession(day)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold flex items-center gap-1"><Plus size={13}/> Log session</button>}
+                {logged && confirmUnlog === day.id ? (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-slate-500">Remove?</span>
+                    <button onClick={async () => { await onUnlog(logged.id); setConfirmUnlog(null); }} className="px-2.5 py-1.5 bg-red-600 text-white rounded-lg font-semibold">Remove</button>
+                    <button onClick={() => setConfirmUnlog(null)} className="px-2.5 py-1.5 bg-slate-100 text-slate-600 rounded-lg font-semibold">Keep</button>
+                  </div>
+                ) : logged ? (
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => onLogSession(logged)} title="View or edit the logged session"
+                      className="flex items-center gap-1 text-xs font-semibold text-emerald-600 px-2 py-1.5 rounded-lg hover:bg-emerald-50"><Check size={13}/> Logged</button>
+                    <button onClick={() => setConfirmUnlog(day.id)} title="Unlog this session"
+                      className="text-xs px-2 py-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-slate-50 font-semibold flex items-center gap-1"><X size={13}/> Unlog</button>
+                  </div>
+                ) : <button onClick={() => logSession(day)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold flex items-center gap-1"><Plus size={13}/> Log session</button>}
               </div>
               <div className="flex items-baseline justify-between gap-3">
                 <div className="min-w-0">
@@ -2303,162 +2314,462 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
 }
 
 //
-// TASK INSIGHTS
+// INSIGHTS TAB
 //
-function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
-  const [timeRange, setTimeRange] = useState("all");
+const INSIGHT_RANGES = [{ id: "7", label: "7 days" }, { id: "30", label: "30 days" }, { id: "90", label: "90 days" }, { id: "all", label: "All time" }];
+const WEEKDAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const WEEKDAY_NAMES = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+const WEEK_ORDER = [1,2,3,4,5,6,0];
+const avgOf = (xs) => xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : null;
+const pctOf = (n, d) => d ? Math.round(n / d * 100) : null;
+const daySpan = (from, to) => Math.round((new Date(to + "T00:00:00") - new Date(from + "T00:00:00")) / 86400000) + 1;
+const fmtSigned = (n, digits = 1) => `${n > 0 ? "+" : n < 0 ? "−" : "±"}${Math.abs(n).toFixed(digits)}`;
 
-  const stats = (() => {
-    const cutoff = timeRange === "all" ? null : (() => { const d=new Date(); d.setDate(d.getDate()-parseInt(timeRange)); const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; })();
+// A comparison is only shown once both sides have this many check-ins
+const MIN_SIDE = 3;
+// Mean mood on days where test() is true vs false; test() returns null to leave a day out.
+const splitAvg = (days, test, metric = "mood") => {
+  const yes = [], no = [];
+  days.forEach(d => { if (!d.mood) return; const t = test(d); if (t === null || t === undefined) return; (t ? yes : no).push(d.mood[metric]); });
+  if (yes.length < MIN_SIDE || no.length < MIN_SIDE) return null;
+  return { yes: avgOf(yes), no: avgOf(no), delta: avgOf(yes) - avgOf(no) };
+};
 
-    const allTasks = Object.entries(dailyTasks)
-      .filter(([date]) => !cutoff || date >= cutoff)
-      .flatMap(([date, {tasks}]) => (tasks || []).filter(t => !t.habitId).map(t => ({...t, date})));
-    const completed = allTasks.filter(t => t.status === "complete");
-    const skipped   = allTasks.filter(t => t.status === "skipped");
-    const pending   = allTasks.filter(t => t.status === "pending");
-    const completionRate = allTasks.length > 0 ? Math.round((completed.length / allTasks.length) * 100) : 0;
-
-    // Streak: consecutive days (going back from today) with ≥1 completed task
-    let streak = 0;
-    const checkDate = new Date();
-    for (let i = 0; i < 365; i++) {
-      const y=checkDate.getFullYear(); const mo=String(checkDate.getMonth()+1).padStart(2,"0"); const dy=String(checkDate.getDate()).padStart(2,"0");
-      const ds = `${y}-${mo}-${dy}`;
-      const dayTasks = tasksOn(dailyTasks, ds);
-      if (dayTasks.some(t => t.status === "complete")) { streak++; checkDate.setDate(checkDate.getDate()-1); }
-      else if (i === 0) { checkDate.setDate(checkDate.getDate()-1); } // today hasn't been completed yet
-      else break;
-    }
-
-    // Last 7 days completion data for bar chart
-    const last7 = Array.from({length:7}, (_,i) => {
-      const d=new Date(); d.setDate(d.getDate()-(6-i));
-      const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0");
-      const ds=`${y}-${m}-${day}`;
-      const dt=tasksOn(dailyTasks, ds);
-      const done=dt.filter(t=>t.status==="complete").length;
-      return { label: new Date(ds+"T00:00:00").toLocaleDateString("en-US",{weekday:"short"}), done, total: dt.length, rate: dt.length > 0 ? Math.round((done/dt.length)*100) : null };
+// One record per calendar day joining mood, tasks, habits and workouts
+const buildDays = (from, to, { moodByDate, dailyTasks, workoutsByDate, habits }) => {
+  const days = [];
+  for (let iso = from; iso <= to; iso = addDaysISO(iso, 1)) {
+    const tasks = tasksOn(dailyTasks, iso);
+    days.push({
+      iso,
+      weekday: new Date(iso + "T00:00:00").getDay(),
+      mood: moodByDate[iso] || null,
+      tasks: { total: tasks.length, done: tasks.filter(t => t.status === "complete").length, skipped: tasks.filter(t => t.status === "skipped").length },
+      habitsDone: habitsDoneOn(dailyTasks, iso),
+      activeHabits: habits.filter(h => h.created <= iso),
+      workouts: workoutsByDate[iso] || 0,
     });
+  }
+  return days;
+};
 
+const summarize = (days) => {
+  const moods = days.filter(d => d.mood);
+  const metricAvg = (k) => avgOf(moods.map(d => d.mood[k]));
+  const taskTotal = days.reduce((s, d) => s + d.tasks.total, 0);
+  const taskDone  = days.reduce((s, d) => s + d.tasks.done, 0);
+  const habitPossible = days.reduce((s, d) => s + d.activeHabits.length, 0);
+  const habitDone = days.reduce((s, d) => s + d.activeHabits.filter(h => d.habitsDone.has(h.id)).length, 0);
+  return {
+    checkIns: moods.length,
+    mood: metricAvg("mood"), energy: metricAvg("energy"), stress: metricAvg("stress"), sleep: metricAvg("sleep"),
+    taskTotal, taskDone, taskSkipped: days.reduce((s, d) => s + d.tasks.skipped, 0), completion: pctOf(taskDone, taskTotal),
+    habitRate: pctOf(habitDone, habitPossible),
+    workouts: days.reduce((s, d) => s + d.workouts, 0),
+  };
+};
 
-    const kanbanDone = kanbanCards.filter(c => c.status === "done" && c.due_date && c.completed_at && (!cutoff || toISO(new Date(c.completed_at)) >= cutoff));
-    let early = 0, ontime = 0, late = 0;
-    kanbanDone.forEach(card => {
-      const diff = Math.floor((new Date(toISO(new Date(card.completed_at)) + "T00:00:00") - new Date(card.due_date + "T00:00:00")) / 86400000);
-      if (diff < 0) early++; else if (diff === 0) ontime++; else late++;
+// Plain-language patterns, strongest first. Each needs MIN_SIDE check-ins on both sides and a gap of at least half a point.
+const buildFindings = (days, habits, tagRows) => {
+  const out = [];
+  const add = (key, delta, text) => { if (Math.abs(delta) >= 0.5) out.push({ key, delta, text }); };
+  const b = (n) => <strong className="text-slate-900">{n.toFixed(1)}</strong>;
+
+  const tasks = splitAvg(days, d => d.tasks.total ? d.tasks.done / d.tasks.total >= 0.8 : null);
+  if (tasks) add("tasks", tasks.delta, <>Your mood averages {b(tasks.yes)} on days you finish most of your tasks, vs {b(tasks.no)} on days you don't.</>);
+
+  const workout = splitAvg(days, d => d.workouts > 0);
+  if (workout) add("workout", workout.delta, <>Mood averages {b(workout.yes)} on workout days and {b(workout.no)} on rest days.</>);
+
+  const sleep = splitAvg(days, d => d.mood.sleep >= 6 ? true : d.mood.sleep <= 4 ? false : null);
+  if (sleep) add("sleep", sleep.delta, <>When you rate sleep 6 or higher, mood averages {b(sleep.yes)}, vs {b(sleep.no)} when it's 4 or lower.</>);
+
+  habits.forEach(h => {
+    const r = splitAvg(days, d => d.iso >= h.created ? d.habitsDone.has(h.id) : null);
+    if (r) add(`habit-${h.id}`, r.delta, <>On days you do <strong className="text-slate-900">{h.name}</strong>, mood averages {b(r.yes)}, vs {b(r.no)} when you skip it.</>);
+  });
+
+  const byWeekday = WEEKDAYS.map((_, wd) => avgOf(days.filter(d => d.mood && d.weekday === wd).map(d => d.mood.mood)));
+  const counts = WEEKDAYS.map((_, wd) => days.filter(d => d.mood && d.weekday === wd).length);
+  const ranked = WEEKDAYS.map((_, wd) => wd).filter(wd => counts[wd] >= MIN_SIDE).sort((x, y) => byWeekday[y] - byWeekday[x]);
+  if (ranked.length >= 4) {
+    const best = ranked[0], worst = ranked[ranked.length - 1];
+    add("weekday", byWeekday[best] - byWeekday[worst], <>{WEEKDAY_NAMES[best]}s tend to be your best days (mood {b(byWeekday[best])}) and {WEEKDAY_NAMES[worst]}s the toughest ({b(byWeekday[worst])}).</>);
+  }
+
+  const lift = tagRows.find(t => t.delta > 0), drag = [...tagRows].reverse().find(t => t.delta < 0);
+  if (lift) add(`tag-${lift.tag}`, lift.delta, <>Days tagged <strong className="text-slate-900">{lift.tag}</strong> average {b(lift.avg)}, {fmtSigned(lift.delta)} above your usual mood.</>);
+  if (drag) add(`tag-${drag.tag}`, drag.delta, <>Days tagged <strong className="text-slate-900">{drag.tag}</strong> average {b(drag.avg)}, {fmtSigned(drag.delta)} below your usual mood.</>);
+
+  return out.sort((x, y) => Math.abs(y.delta) - Math.abs(x.delta)).slice(0, 4);
+};
+
+function DeltaBadge({ value, unit = "", digits = 1, label }) {
+  if (value === null || value === undefined || isNaN(value)) return <span className="text-xs text-slate-400">{label ? `— ${label}` : ""}</span>;
+  const up = value > 0, flat = Math.abs(value) < Math.pow(10, -digits) / 2;
+  const Icon = flat ? null : up ? ChevronUp : ChevronDown;
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-xs font-medium ${flat ? "text-slate-400" : up ? "text-emerald-600" : "text-rose-600"}`}>
+      {Icon && <Icon size={12}/>}{flat ? "no change" : `${Math.abs(value).toFixed(digits)}${unit}`}
+      {label && <span className="text-slate-400 font-normal ml-1">{label}</span>}
+    </span>
+  );
+}
+
+// Mood-metric line over task-completion bars, sharing one date axis and one hover readout
+function TrendsCard({ days, isMobile }) {
+  const [metricKey, setMetricKey] = useState("mood");
+  const [hover, setHover] = useState(null);
+  const plotRef = useRef(null);
+  const metric = MOOD_METRICS.find(m => m.key === metricKey);
+
+  // Long ranges are averaged by week so the chart stays readable
+  const weekly = days.length > 92;
+  const size = weekly ? 7 : 1;
+  const buckets = [];
+  for (let i = 0; i < days.length; i += size) {
+    const slice = days.slice(i, i + size);
+    const moods = slice.filter(d => d.mood);
+    const total = slice.reduce((s, d) => s + d.tasks.total, 0), done = slice.reduce((s, d) => s + d.tasks.done, 0);
+    buckets.push({ from: slice[0].iso, to: slice[slice.length - 1].iso, value: avgOf(moods.map(d => d.mood[metricKey])), total, done, rate: pctOf(done, total) });
+  }
+  const n = buckets.length;
+  const xPct = (i) => (i + 0.5) / n * 100;
+  const yPct = (v) => (8 - v) / 7 * 100;
+  const pts = buckets.map((b, i) => b.value === null ? null : { i, x: xPct(i), y: yPct(b.value), v: b.value }).filter(Boolean);
+  const hasTasks = buckets.some(b => b.total > 0);
+  const labelOf = (b) => weekly ? `Week of ${isoToLabel(b.from)}` : isoToLong(b.from);
+
+  const onMove = (e) => {
+    const r = plotRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const i = Math.min(n - 1, Math.max(0, Math.floor((e.clientX - r.left) / r.width * n)));
+    setHover(i);
+  };
+  const hb = hover !== null ? buckets[hover] : null;
+  const tipAlign = hover === null ? "" : xPct(hover) < 20 ? "translate-x-0" : xPct(hover) > 80 ? "-translate-x-full" : "-translate-x-1/2";
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-5">
+      <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+        <h3 className="font-bold text-slate-800 flex items-center gap-2"><TrendingUp size={16} className="text-indigo-500"/> Trends</h3>
+        <div className="flex gap-1">
+          {MOOD_METRICS.map(m => (
+            <button key={m.key} onClick={() => setMetricKey(m.key)}
+              className={`px-2.5 py-1 rounded-lg text-xs font-medium transition ${metricKey === m.key ? "bg-indigo-600 text-white" : "text-slate-500 hover:text-slate-700 hover:bg-slate-50"}`}>{m.label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="relative select-none" onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={() => setHover(null)}>
+        {/* Metric line, 1–8 scale */}
+        <p className="text-xs text-slate-400 mb-1">{metric.label}{metric.inverted ? " (lower is better)" : ""}{weekly ? " · weekly average" : ""}</p>
+        <div className="flex">
+          <div className="w-6 flex flex-col justify-between text-[10px] text-slate-400 text-right pr-1.5" style={{ height: isMobile ? 110 : 140 }}><span>8</span><span>4</span><span>1</span></div>
+          <div ref={plotRef} className="flex-1 relative" style={{ height: isMobile ? 110 : 140 }}>
+            {[8, 6, 4, 2].map(v => <div key={v} className="absolute left-0 right-0 border-t border-slate-100" style={{ top: `${yPct(v)}%` }}/>)}
+            <div className="absolute left-0 right-0 bottom-0 border-t border-slate-200"/>
+            {pts.length === 0 && <p className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">No check-ins in this range.</p>}
+            <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{ overflow: "visible" }}>
+              <defs>
+                <linearGradient id="trendSpectrum" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
+                  {[8,7,6,5,4,3,2,1].map((v, i) => <stop key={v} offset={`${(i / 7) * 100}%`} stopColor={metricColors(metric, v).hex}/>)}
+                </linearGradient>
+              </defs>
+              {pts.length > 1 && <polyline points={pts.map(p => `${p.x},${p.y}`).join(" ")} fill="none" stroke="url(#trendSpectrum)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>}
+            </svg>
+            {pts.length <= 45 && pts.map(p => (
+              <div key={p.i} className={`absolute rounded-full ${metricColors(metric, p.v).bg} ${hover === p.i ? "w-3 h-3" : "w-2 h-2"}`}
+                style={{ left: `${p.x}%`, top: `${p.y}%`, transform: "translate(-50%,-50%)", boxShadow: "0 0 0 2px #0e1630" }}/>
+            ))}
+            {hover !== null && <div className="absolute top-0 bottom-0 border-l border-slate-400/60 pointer-events-none" style={{ left: `${xPct(hover)}%` }}/>}
+          </div>
+        </div>
+
+        {/* Task completion bars on the same date axis */}
+        {hasTasks && (
+          <>
+            <p className="text-xs text-slate-400 mt-4 mb-1">Tasks completed</p>
+            <div className="flex">
+              <div className="w-6 flex flex-col justify-between text-[10px] text-slate-400 text-right pr-1.5 h-12"><span>100%</span><span></span></div>
+              <div className="flex-1 relative h-12">
+                <div className="absolute inset-0 flex items-end" style={{ gap: n > 60 ? 1 : 2 }}>
+                  {buckets.map((b, i) => (
+                    <div key={i} className="flex-1 h-full flex items-end">
+                      {b.total > 0
+                        ? <div className={`w-full bg-emerald-500 rounded-t-sm ${hover !== null && hover !== i ? "opacity-60" : ""}`} style={{ height: `${Math.max(b.rate, 4)}%` }}/>
+                        : <div className="w-full h-px bg-slate-200"/>}
+                    </div>
+                  ))}
+                </div>
+                {hover !== null && <div className="absolute top-0 bottom-0 border-l border-slate-400/60 pointer-events-none" style={{ left: `${xPct(hover)}%` }}/>}
+              </div>
+            </div>
+          </>
+        )}
+
+        <div className="flex justify-between text-[11px] text-slate-400 mt-2 ml-6">
+          <span>{isoToLabel(days[0].iso)}</span>
+          <span>{isoToLabel(days[days.length - 1].iso)}</span>
+        </div>
+
+        {hb && (
+          <div className={`absolute top-5 z-10 pointer-events-none ${tipAlign}`} style={{ left: `calc(1.5rem + (100% - 1.5rem) * ${xPct(hover) / 100})` }}>
+            <div className="bg-slate-50 border border-slate-300 rounded-lg shadow-lg px-3 py-2 text-xs whitespace-nowrap">
+              <p className="font-semibold text-slate-800 mb-0.5">{labelOf(hb)}</p>
+              <p className="text-slate-500">{metric.label}: <span className="text-slate-800 font-semibold">{hb.value === null ? "no check-in" : hb.value.toFixed(weekly ? 1 : 0)}</span></p>
+              <p className="text-slate-500">Tasks: <span className="text-slate-800 font-semibold">{hb.total ? `${hb.done}/${hb.total}` : "none"}</span></p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits }) {
+  const [moodEntries, setMoodEntries] = useState([]);
+  const [workouts, setWorkouts]       = useState([]);
+  const [loaded, setLoaded]           = useState(false);
+  const [range, setRange]             = useState("30");
+  const uid = session?.user?.id;
+
+  useEffect(() => {
+    Promise.all([
+      supabase.from("mood_entries").select("*").eq("user_id", uid).order("date"),
+      supabase.from("workouts").select("date,type").eq("user_id", uid),
+    ]).then(([m, w]) => {
+      if (m.data) setMoodEntries(m.data);
+      if (w.data) setWorkouts(w.data);
+      setLoaded(true);
     });
+  }, []);
 
-    // Habit consistency: share of days checked off since the habit was created (bounded by the range)
-    const today = todayISO();
-    const habitStats = habits.map(h => {
-      const created = h.created_at ? toISO(new Date(h.created_at)) : today;
-      const from = cutoff && cutoff > created ? cutoff : created;
-      let days = 0, done = 0;
-      for (let d = from; d <= today && days < 3650; d = addDaysISO(d, 1)) { days++; if (habitsDoneOn(dailyTasks, d).has(h.id)) done++; }
-      return { id: h.id, name: h.name, done, days, rate: days ? Math.round(done/days*100) : 0, streak: habitStreak(dailyTasks, h.id, today) };
-    });
+  const today = todayISO();
+  const moodByDate = {};
+  moodEntries.forEach(e => { moodByDate[e.date] = e; });
+  const workoutsByDate = {};
+  workouts.forEach(w => { const d = parseWorkoutDate(w.date); if (isValidDate(d)) { const iso = toISO(d); workoutsByDate[iso] = (workoutsByDate[iso] || 0) + 1; } });
+  const habitList = habits.map(h => ({ ...h, created: h.created_at ? toISO(new Date(h.created_at)) : today }));
+  const sources = { moodByDate, dailyTasks, workoutsByDate, habits: habitList };
 
-    return { total: allTasks.length, completed: completed.length, skipped: skipped.length, pending: pending.length, completionRate, kanban: { early, ontime, late, total: kanbanDone.length }, streak, last7, habitStats };
-  })();
+  // "All time" starts at the earliest thing logged, capped at three years
+  const earliest = [
+    ...Object.keys(moodByDate),
+    ...Object.keys(workoutsByDate),
+    ...Object.keys(dailyTasks).filter(d => (dailyTasks[d]?.tasks || []).length),
+  ].filter(d => d <= today).sort()[0] || today;
+  const from = range === "all" ? (earliest < addDaysISO(today, -1095) ? addDaysISO(today, -1095) : earliest) : addDaysISO(today, -(parseInt(range) - 1));
+  const span = daySpan(from, today);
+  const days = buildDays(from, today, sources);
+  const cur = summarize(days);
+  const prev = range === "all" ? null : summarize(buildDays(addDaysISO(from, -span), addDaysISO(from, -1), sources));
+  const prevLabel = range === "all" ? "" : `vs prev ${span}d`;
+  const diff = (k) => prev && cur[k] !== null && prev[k] !== null ? cur[k] - prev[k] : null;
 
-  if (stats.total === 0 && kanbanCards.length === 0 && habits.length === 0 && goals.length === 0) return null;
+  // Tags: compare each tag's average with the overall average so rare one-off tags can't top the list
+  const tagAgg = {};
+  days.forEach(d => (d.mood?.tags || []).forEach(tag => { (tagAgg[tag] ||= []).push(d.mood.mood); }));
+  const tagRows = Object.entries(tagAgg)
+    .filter(([, v]) => v.length >= MIN_SIDE)
+    .map(([tag, v]) => ({ tag, count: v.length, avg: avgOf(v), delta: avgOf(v) - cur.mood }))
+    .sort((x, y) => y.delta - x.delta);
+  const lifts = tagRows.filter(t => t.delta >= 0.2).slice(0, 5);
+  const drags = tagRows.filter(t => t.delta <= -0.2).reverse().slice(0, 5);
+  const mostUsed = Object.entries(tagAgg).map(([tag, v]) => ({ tag, count: v.length })).sort((x, y) => y.count - x.count).slice(0, 10);
 
-  const maxLast7 = Math.max(...stats.last7.map(d => d.total), 1);
+  const findings = buildFindings(days, habitList, tagRows);
+
+  // Weekly rhythm
+  const rhythm = WEEK_ORDER.map(wd => {
+    const ds = days.filter(d => d.weekday === wd);
+    const moods = ds.filter(d => d.mood).map(d => d.mood.mood);
+    const total = ds.reduce((s, d) => s + d.tasks.total, 0), done = ds.reduce((s, d) => s + d.tasks.done, 0);
+    return { wd, mood: avgOf(moods), rate: pctOf(done, total) };
+  });
+  const showRhythm = span >= 14 && rhythm.filter(r => r.mood !== null || r.rate !== null).length >= 4;
+
+  // Current task streak (independent of range): consecutive days with a completed task, today allowed to be in progress
+  let streak = 0;
+  for (let d = today, i = 0; i < 3650; i++, d = addDaysISO(d, -1)) {
+    if (tasksOn(dailyTasks, d).some(t => t.status === "complete")) streak++;
+    else if (i > 0) break;
+  }
+
+  const habitRows = habitList.map(h => {
+    const hd = days.filter(d => d.iso >= h.created);
+    const done = hd.filter(d => d.habitsDone.has(h.id)).length;
+    const impact = splitAvg(days, d => d.iso >= h.created ? d.habitsDone.has(h.id) : null);
+    return { ...h, done, days: hd.length, rate: pctOf(done, hd.length) || 0, streak: habitStreak(dailyTasks, h.id, today), impact };
+  });
+
+  const kanbanDone = kanbanCards.filter(c => c.status === "done" && c.due_date && c.completed_at && toISO(new Date(c.completed_at)) >= from);
+  const timing = { early: 0, ontime: 0, late: 0 };
+  kanbanDone.forEach(c => {
+    const late = daySpan(c.due_date, toISO(new Date(c.completed_at))) - 1;
+    timing[late < 0 ? "early" : late === 0 ? "ontime" : "late"]++;
+  });
+
+  const nothingYet = loaded && moodEntries.length === 0 && workouts.length === 0 && habits.length === 0 && goals.length === 0 && kanbanCards.length === 0
+    && !Object.values(dailyTasks).some(d => (d.tasks || []).length);
+  if (nothingYet) return (
+    <div className="bg-white rounded-xl border border-slate-200 p-10 text-center">
+      <Lightbulb className="text-slate-300 mx-auto mb-3" size={48}/>
+      <h3 className="text-lg font-bold text-slate-500 mb-2">Insights will appear here</h3>
+      <p className="text-slate-400 text-sm">Log moods, tasks, habits and workouts, and this page will start connecting the dots.</p>
+    </div>
+  );
+
+  const card = "bg-white rounded-xl border border-slate-200 p-5";
+  const kpis = [
+    { label: "Avg mood", value: cur.mood === null ? "—" : cur.mood.toFixed(1), sub: cur.mood === null ? "no check-ins" : `${cur.checkIns} check-in${cur.checkIns === 1 ? "" : "s"}`, color: cur.mood === null ? "text-slate-400" : MOOD_COLORS(cur.mood).text, delta: <DeltaBadge value={diff("mood")} label={prevLabel}/> },
+    { label: "Tasks done", value: cur.completion === null ? "—" : `${cur.completion}%`, sub: `${cur.taskDone}/${cur.taskTotal} tasks`, color: "text-emerald-600", delta: <DeltaBadge value={diff("completion")} digits={0} unit=" pts" label={prevLabel}/> },
+    { label: "Habits kept", value: cur.habitRate === null ? "—" : `${cur.habitRate}%`, sub: `${habits.length} habit${habits.length === 1 ? "" : "s"}`, color: "text-violet-600", delta: <DeltaBadge value={diff("habitRate")} digits={0} unit=" pts" label={prevLabel}/> },
+    { label: "Workouts", value: cur.workouts, sub: `${(cur.workouts / span * 7).toFixed(1)} / week`, color: "text-blue-600", delta: <DeltaBadge value={diff("workouts")} digits={0} label={prevLabel}/> },
+  ];
 
   return (
     <div className="space-y-4">
-      {/* Time range filter */}
-      <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-        {[["7","7 days"],["30","30 days"],["all","All time"]].map(([val,label]) => (
-          <button key={val} onClick={()=>setTimeRange(val)} className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${timeRange===val?"bg-white shadow text-slate-900":"text-slate-500 hover:text-slate-700"}`}>{label}</button>
+      <Segmented value={range} onChange={setRange} options={INSIGHT_RANGES}/>
+
+      {/* Headline numbers with change vs the previous period of the same length */}
+      <div className={`grid ${isMobile ? "grid-cols-2" : "grid-cols-4"} gap-3`}>
+        {kpis.map(k => (
+          <div key={k.label} className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="text-xs text-slate-500">{k.label}</div>
+            <div className={`text-2xl font-bold mt-0.5 ${k.color}`}>{k.value}</div>
+            <div className="text-xs text-slate-400">{k.sub}</div>
+            {prev && <div className="mt-1.5">{k.delta}</div>}
+          </div>
         ))}
       </div>
 
-      {/* Streak + completion rate hero row */}
-      {stats.total > 0 && (
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-white rounded-xl border border-slate-200 p-4 text-center">
-            <div className="text-3xl font-bold text-amber-500">{stats.streak}</div>
-            <div className="text-xs text-slate-500 mt-0.5">Day Streak</div>
-          </div>
-          <div className="bg-white rounded-xl border border-slate-200 p-4 text-center">
-            <div className="text-3xl font-bold text-emerald-600">{stats.completionRate}%</div>
-            <div className="text-xs text-slate-500 mt-0.5">Completion Rate</div>
-          </div>
-        </div>
-      )}
-
-      {/* 7-day bar chart */}
-      <div className="bg-white rounded-xl border border-slate-200 p-5">
-        <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><BarChart3 size={15} className="text-blue-500"/> Last 7 Days</h3>
-        <div className="flex items-end gap-2 h-20">
-          {stats.last7.map(({label, done, total, rate}, i) => (
-            <div key={i} className="flex-1 flex flex-col items-center gap-1">
-              <div className="w-full flex flex-col justify-end" style={{height:"56px"}}>
-                {total > 0 ? (
-                  <div className="w-full rounded-t overflow-hidden" style={{height:`${Math.max((total/maxLast7)*56, 8)}px`, background:"#22305a"}}>
-                    <div className="w-full rounded-t bg-emerald-500 transition-all" style={{height:`${rate}%`}}/>
-                  </div>
-                ) : (
-                  <div className="w-full rounded-t" style={{height:"4px", background:"#18233f"}}/>
-                )}
-              </div>
-              <span className="text-xs text-slate-400">{label}</span>
-            </div>
-          ))}
-        </div>
-        <p className="text-xs text-slate-400 mt-2 text-center">Green = completed, gray = total tasks</p>
+      {/* What stands out */}
+      <div className={card}>
+        <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Lightbulb size={16} className="text-amber-500"/> What stands out</h3>
+        {findings.length > 0 ? (
+          <>
+            <ul className="space-y-2.5">
+              {findings.map(f => (
+                <li key={f.key} className="flex gap-3 text-sm text-slate-600">
+                  <span className={`mt-0.5 flex-shrink-0 text-xs font-semibold px-1.5 py-0.5 rounded h-fit ${f.delta > 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>{fmtSigned(f.delta)}</span>
+                  <span>{f.text}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-slate-400 mt-3">Mood is on a 1–8 scale. These are patterns in your own logs, not proof of cause.</p>
+          </>
+        ) : (
+          <p className="text-sm text-slate-400">No clear patterns yet. Comparisons appear once there are at least {MIN_SIDE} mood check-ins on each side, e.g. {MIN_SIDE} workout days and {MIN_SIDE} rest days{range === "7" ? "; try a longer range" : ""}.</p>
+        )}
       </div>
 
-      {/* Task breakdown */}
-      {stats.total > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Task Breakdown</h3>
-          <div className="grid grid-cols-4 gap-3 mb-4">
-            <div className="text-center"><div className="text-2xl font-bold text-slate-800">{stats.total}</div><div className="text-xs text-slate-500">Total</div></div>
-            <div className="text-center"><div className="text-2xl font-bold text-emerald-600">{stats.completed}</div><div className="text-xs text-slate-500">Done</div></div>
-            <div className="text-center"><div className="text-2xl font-bold text-amber-600">{stats.pending}</div><div className="text-xs text-slate-500">Pending</div></div>
-            <div className="text-center"><div className="text-2xl font-bold text-slate-400">{stats.skipped}</div><div className="text-xs text-slate-500">Skipped</div></div>
+      <TrendsCard key={range} days={days} isMobile={isMobile}/>
+
+      {showRhythm && (
+        <div className={card}>
+          <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Calendar size={16} className="text-cyan-400"/> Weekly rhythm</h3>
+          <div className="grid grid-cols-7 gap-1.5 text-center">
+            {rhythm.map(r => {
+              const c = r.mood !== null ? MOOD_COLORS(r.mood) : null;
+              return (
+                <div key={r.wd}>
+                  <div className="text-xs text-slate-400 mb-1">{WEEKDAYS[r.wd].slice(0, isMobile ? 1 : 3)}</div>
+                  <div className={`rounded-lg py-2 ${c ? `${c.light}` : "bg-slate-50"}`} title={r.mood !== null ? `Average mood ${r.mood.toFixed(1)}` : "No check-ins"}>
+                    <div className={`text-sm font-bold ${c ? c.text : "text-slate-300"}`}>{r.mood !== null ? r.mood.toFixed(1) : "—"}</div>
+                    <div className="text-[10px] text-slate-400">mood</div>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1" title="Tasks completed">{r.rate !== null ? `${r.rate}%` : "—"}</div>
+                </div>
+              );
+            })}
           </div>
-          <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-            <div className="h-full bg-emerald-500 rounded-full transition-all" style={{width:`${stats.completionRate}%`}}/>
-          </div>
+          <p className="text-xs text-slate-400 mt-2">Average mood and share of tasks completed by day of the week.</p>
         </div>
       )}
 
-      {stats.habitStats.length > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Repeat size={15} className="text-violet-500"/> Habit Consistency</h3>
+      {cur.taskTotal > 0 && (
+        <div className={card}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckSquare size={16} className="text-cyan-400"/> Tasks</h3>
+            {streak > 0 && <span className="flex items-center gap-1 text-sm font-semibold text-amber-600"><Flame size={14}/>{streak}-day streak</span>}
+          </div>
+          <div className="grid grid-cols-3 gap-3 mb-3 text-center">
+            <div><div className="text-2xl font-bold text-emerald-600">{cur.taskDone}</div><div className="text-xs text-slate-500">Done</div></div>
+            <div><div className="text-2xl font-bold text-amber-600">{cur.taskTotal - cur.taskDone - cur.taskSkipped}</div><div className="text-xs text-slate-500">Not done</div></div>
+            <div><div className="text-2xl font-bold text-slate-400">{cur.taskSkipped}</div><div className="text-xs text-slate-500">Skipped</div></div>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 rounded-full" style={{ width: `${cur.completion || 0}%` }}/></div>
+          {kanbanDone.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-slate-100">
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Kanban cards finished</p>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-emerald-50 rounded-lg p-2 text-center"><div className="text-xl font-bold text-emerald-600">{timing.early}</div><div className="text-xs text-slate-500">Early</div></div>
+                <div className="bg-blue-50 rounded-lg p-2 text-center"><div className="text-xl font-bold text-blue-600">{timing.ontime}</div><div className="text-xs text-slate-500">On time</div></div>
+                <div className="bg-rose-50 rounded-lg p-2 text-center"><div className="text-xl font-bold text-rose-600">{timing.late}</div><div className="text-xs text-slate-500">Late</div></div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {habitRows.length > 0 && (
+        <div className={card}>
+          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Repeat size={15} className="text-violet-500"/> Habits</h3>
           <div className="space-y-3">
-            {stats.habitStats.map(h => (
+            {habitRows.map(h => (
               <div key={h.id}>
-                <div className="flex items-center justify-between text-sm mb-1">
-                  <span className="font-medium text-slate-700">{h.name}</span>
-                  <span className="flex items-center gap-2 text-xs text-slate-500">
+                <div className="flex items-center justify-between gap-2 text-sm mb-1">
+                  <span className="font-medium text-slate-700 truncate">{h.name}</span>
+                  <span className="flex items-center gap-2 text-xs text-slate-500 flex-shrink-0">
+                    {h.impact && Math.abs(h.impact.delta) >= 0.3 && (
+                      <span className={`font-semibold px-1.5 py-0.5 rounded ${h.impact.delta > 0 ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`} title="Average mood on days you did it vs days you didn't">{fmtSigned(h.impact.delta)} mood</span>
+                    )}
                     {h.streak > 0 && <span className="flex items-center gap-0.5 font-semibold text-amber-600"><Flame size={12}/>{h.streak}</span>}
                     {h.done}/{h.days} days
                   </span>
                 </div>
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-violet-500 rounded-full" style={{width:`${h.rate}%`}}/></div>
+                <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-violet-500 rounded-full" style={{ width: `${h.rate}%` }}/></div>
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {stats.kanban.total > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Kanban Card Timing</h3>
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-emerald-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-emerald-600">{stats.kanban.early}</div><div className="text-xs text-slate-500">Early</div></div>
-            <div className="bg-blue-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-blue-600">{stats.kanban.ontime}</div><div className="text-xs text-slate-500">On Time</div></div>
-            <div className="bg-rose-50 rounded-lg p-3 text-center"><div className="text-2xl font-bold text-rose-600">{stats.kanban.late}</div><div className="text-xs text-slate-500">Overdue</div></div>
+      {mostUsed.length > 0 && (
+        <div className={card}>
+          <h3 className="font-bold text-slate-800 mb-1 flex items-center gap-2"><SmilePlus size={16} className="text-rose-400"/> What moves your mood</h3>
+          <p className="text-xs text-slate-400 mb-4">Average mood on tagged days compared with your overall {cur.mood?.toFixed(1)}. Tags need {MIN_SIDE}+ uses to count.</p>
+          {(lifts.length > 0 || drags.length > 0) ? (
+            <div className={`grid ${isMobile ? "grid-cols-1" : "grid-cols-2"} gap-5 mb-4`}>
+              {[["Lifts you up", lifts, "bg-emerald-500"], ["Brings you down", drags, "bg-rose-500"]].map(([title, rows, bar]) => (
+                <div key={title}>
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">{title}</p>
+                  {rows.length === 0 ? <p className="text-sm text-slate-400">Nothing yet.</p> : (
+                    <div className="space-y-2">
+                      {rows.map(t => (
+                        <div key={t.tag} className="flex items-center gap-3 text-sm">
+                          <span className="w-24 truncate font-medium text-slate-700">{t.tag}</span>
+                          <div className="flex-1 bg-slate-100 rounded-full h-2"><div className={`${bar} h-2 rounded-full`} style={{ width: `${Math.min(Math.abs(t.delta) / 3 * 100, 100)}%` }}/></div>
+                          <span className="w-10 text-right font-semibold text-slate-700">{fmtSigned(t.delta)}</span>
+                          <span className="w-8 text-right text-xs text-slate-400">{t.count}×</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : <p className="text-sm text-slate-400 mb-4">No tag stands out yet in this range.</p>}
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Most used</p>
+          <div className="flex flex-wrap gap-1.5">
+            {mostUsed.map(t => <span key={t.tag} className="px-2.5 py-1 rounded-full text-xs bg-slate-100 text-slate-600">{t.tag} <span className="text-slate-400">{t.count}</span></span>)}
           </div>
         </div>
       )}
+
       {goals.length > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
+        <div className={card}>
           <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Flag size={15} className="text-blue-500"/> Goal Progress</h3>
           <div className="space-y-3">
             {goals.map(g => {
@@ -2477,140 +2788,6 @@ function TaskInsights({ dailyTasks, kanbanCards, goals, habits = [] }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-//
-// INSIGHTS TAB
-//
-function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits }) {
-  const [moodEntries, setMoodEntries] = useState([]);
-  const [timeRange, setTimeRange]     = useState("30");
-  const uid = session?.user?.id;
-
-  useEffect(() => {
-    supabase.from("mood_entries").select("*").eq("user_id", uid).order("date").then(({ data }) => { if (data) setMoodEntries(data); });
-  }, []);
-
-  if (moodEntries.length < 3) return (
-    <div className="space-y-5">
-      <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-10 text-center">
-        <Lightbulb className="text-slate-300 mx-auto mb-3" size={48}/>
-        <h3 className="text-lg font-bold text-slate-500 mb-2">Mood insights will appear here</h3>
-        <p className="text-slate-400 text-sm">Log at least 3 mood check-ins to start seeing patterns.</p>
-        <p className="text-slate-400 text-sm mt-1">You have {moodEntries.length} so far.</p>
-      </div>
-      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>
-    </div>
-  );
-
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - parseInt(timeRange));
-  const filtered = moodEntries.filter(e => new Date(e.date) >= cutoff);
-
-  const tagStats = {};
-  filtered.forEach(e => { (e.tags||[]).forEach(tag => { if (!tagStats[tag]) tagStats[tag]={total:0,count:0}; tagStats[tag].total+=e.mood; tagStats[tag].count+=1; }); });
-  const tagList = Object.entries(tagStats).map(([tag,{total,count}]) => ({ tag, avg: total/count, count })).filter(t=>t.count>=1).sort((a,b)=>b.avg-a.avg);
-
-  const avgMood   = filtered.length ? (filtered.reduce((s,e)=>s+e.mood,0)/filtered.length).toFixed(1) : 0;
-  const avgEnergy = filtered.length ? (filtered.reduce((s,e)=>s+e.energy,0)/filtered.length).toFixed(1) : 0;
-  const avgStress = filtered.length ? (filtered.reduce((s,e)=>s+e.stress,0)/filtered.length).toFixed(1) : 0;
-  const avgSleep  = filtered.length ? (filtered.reduce((s,e)=>s+e.sleep,0)/filtered.length).toFixed(1) : 0;
-
-  const timeline  = [...filtered].sort((a,b)=>a.date.localeCompare(b.date)).slice(-14);
-  const topTags   = tagList.slice(0,5);
-  const bottomTags = [...tagList].sort((a,b)=>a.avg-b.avg).slice(0,5);
-  const freqTags  = [...tagList].sort((a,b)=>b.count-a.count).slice(0,10);
-  const maxCount  = freqTags[0]?.count || 1;
-
-  return (
-    <div className="space-y-5">
-      <div className="flex gap-2 bg-white rounded-xl p-1 shadow-sm border border-slate-100 w-fit">
-        {[["7","7 days"],["30","30 days"],["90","90 days"],["365","All time"]].map(([val,label]) => (
-          <button key={val} onClick={()=>setTimeRange(val)} className={`px-4 py-2 rounded-lg text-sm font-medium transition ${timeRange===val?"bg-indigo-600 text-white shadow":"text-slate-500 hover:text-slate-700"}`}>{label}</button>
-        ))}
-      </div>
-      <div className="grid grid-cols-4 gap-3">
-        {[{label:"Avg Mood",value:avgMood,icon:"",color:MOOD_COLORS(parseFloat(avgMood))},{label:"Avg Energy",value:avgEnergy,icon:"",color:MOOD_COLORS(parseFloat(avgEnergy))},{label:"Avg Stress",value:avgStress,icon:"",color:MOOD_COLORS(9-parseFloat(avgStress))},{label:"Avg Sleep",value:avgSleep,icon:"",color:MOOD_COLORS(parseFloat(avgSleep))}].map(({label,value,icon,color}) => (
-          <div key={label} className="bg-white rounded-xl shadow-sm border border-slate-100 p-4 text-center">
-            <div className="text-2xl mb-1">{icon}</div>
-            <div className={`text-2xl font-bold ${color.text}`}>{value}</div>
-            <div className="text-xs text-slate-400 mt-0.5">{label}</div>
-          </div>
-        ))}
-      </div>
-      {timeline.length >= 2 && (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-          <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><TrendingUp size={16} className="text-indigo-500"/> Mood Timeline</h3>
-          <div className="relative" style={{height:"120px"}}>
-            <div className="absolute left-0 top-0 bottom-0 w-8 flex flex-col justify-between text-xs text-slate-300 text-right pr-1"><span>8</span><span>4</span><span>1</span></div>
-            <div className="ml-10 h-full relative">
-              <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none" style={{overflow:"visible"}}>
-                {/* Line takes the color of the mood it passes through, top (8) to bottom (1) */}
-                <defs>
-                  <linearGradient id="moodSpectrum" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="100">
-                    {[8,7,6,5,4,3,2,1].map((n, i) => <stop key={n} offset={`${(i/7)*100}%`} stopColor={MOOD_COLORS(n).hex}/>)}
-                  </linearGradient>
-                </defs>
-                <polyline points={timeline.map((e,i) => { const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; return `${x},${y}`; }).join(" ")} fill="none" stroke="url(#moodSpectrum)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
-              </svg>
-              {timeline.map((e,i) => {
-                const x=(i/(timeline.length-1))*100; const y=((8-e.mood)/(8-1))*100; const colors=MOOD_COLORS(e.mood);
-                return <div key={i} className={`absolute w-3 h-3 ${colors.bg} rounded-full border-2 border-white shadow`} style={{left:`${x}%`,top:`${y}%`,transform:"translate(-50%,-50%)"}} title={`${fmtDisplay(e.date)}: ${e.mood}/8`}/>;
-              })}
-            </div>
-          </div>
-          <div className="flex justify-between text-xs text-slate-400 mt-2 ml-10">
-            <span>{fmtDisplay(timeline[0].date)}</span>
-            <span>{fmtDisplay(timeline[timeline.length-1].date)}</span>
-          </div>
-        </div>
-      )}
-      {tagList.length > 0 && (
-        <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-2"} gap-4`}>
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><span className="text-emerald-500"></span> Best Mood Tags</h3>
-            <div className="space-y-2">
-              {topTags.map(({tag,avg,count}) => { const colors=MOOD_COLORS(avg); return (
-                <div key={tag} className="flex items-center gap-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${colors.light} ${colors.text} min-w-16 text-center`}>{tag}</span>
-                  <div className="flex-1 bg-slate-100 rounded-full h-2"><div className={`${colors.bg} h-2 rounded-full`} style={{width:`${(avg/8)*100}%`}}/></div>
-                  <span className={`text-sm font-bold ${colors.text} w-8 text-right`}>{avg.toFixed(1)}</span>
-                  <span className="text-xs text-slate-300 w-10 text-right">{count}x</span>
-                </div>
-              ); })}
-            </div>
-          </div>
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><span className="text-rose-500"></span> Lowest Mood Tags</h3>
-            <div className="space-y-2">
-              {bottomTags.map(({tag,avg,count}) => { const colors=MOOD_COLORS(avg); return (
-                <div key={tag} className="flex items-center gap-3">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${colors.light} ${colors.text} min-w-16 text-center`}>{tag}</span>
-                  <div className="flex-1 bg-slate-100 rounded-full h-2"><div className={`${colors.bg} h-2 rounded-full`} style={{width:`${(avg/8)*100}%`}}/></div>
-                  <span className={`text-sm font-bold ${colors.text} w-8 text-right`}>{avg.toFixed(1)}</span>
-                  <span className="text-xs text-slate-300 w-10 text-right">{count}x</span>
-                </div>
-              ); })}
-            </div>
-          </div>
-        </div>
-      )}
-      {freqTags.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-5">
-          <h3 className="font-bold text-slate-800 mb-4">Tag Frequency</h3>
-          <div className="space-y-2">
-            {freqTags.map(({tag,count,avg}) => { const colors=MOOD_COLORS(avg); return (
-              <div key={tag} className="flex items-center gap-3">
-                <span className="text-sm text-slate-600 w-24 truncate font-medium">{tag}</span>
-                <div className="flex-1 bg-slate-100 rounded-full h-3"><div className={`${colors.bg} h-3 rounded-full transition-all`} style={{width:`${(count/maxCount)*100}%`}}/></div>
-                <span className="text-sm text-slate-500 w-10 text-right">{count}x</span>
-              </div>
-            ); })}
-          </div>
-        </div>
-      )}
-      <TaskInsights dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>
     </div>
   );
 }
