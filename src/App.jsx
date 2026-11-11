@@ -1718,6 +1718,11 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
 const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => c.due_date && (c.due_date === iso
   || (iso === todayISO() && c.due_date < iso && (c.status !== "done" || stampISO(c.completed_at) === iso))));
 
+// Cards due in the six days after a day: a heads-up list, not part of that day's own tally.
+// Only for today onwards; a card finished early stays listed on the day it was finished so it can be unticked.
+const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => c.due_date && c.due_date > iso && c.due_date <= addDaysISO(iso, 6)
+  && (c.status !== "done" || stampISO(c.completed_at) === iso));
+
 function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, deleteHabit, kanbanCards, goals, links }) {
   const [showPicker, setShowPicker] = useState(false);
   const [viewDate, setViewDate]     = useState(todayISO());
@@ -1737,6 +1742,8 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
   const isTom   = viewDate === tomorrow();
   // Kanban cards due this day show up on their own, unless they're already planned as one of its tasks
   const dueCards = cardsDueOn(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
+    .sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const upcomingCards = cardsComingUp(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
     .sort((a, b) => a.due_date.localeCompare(b.due_date));
   const dueDone = dueCards.filter(c => c.status === "done").length;
   const total   = tasks.length + dueCards.length;
@@ -1866,7 +1873,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
             </div>
           )}
         </div>
-        {total===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
+        {total===0 && upcomingCards.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
         {isMobile && tasks.length>0 && <p className="text-xs text-slate-400 -mt-2 mb-3">Tap a task to edit, skip or delete it. Drag the handle to reorder.</p>}
         <div className="space-y-2 mb-4">
           {shownTasks.map(t => {
@@ -1941,11 +1948,11 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
             );
           })}
         </div>
-        {dueCards.length > 0 && (
-          <div className="mb-4">
-            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Due on the Kanban board</p>
+        {[["Due on the Kanban board", dueCards], ["Coming up this week", upcomingCards]].map(([heading, cards]) => cards.length > 0 && (
+          <div key={heading} className="mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">{heading}</p>
             <div className="space-y-2">
-              {dueCards.map(c => {
+              {cards.map(c => {
                 const cardDone = c.status === "done";
                 const overdue = !cardDone && c.due_date < todayISO();
                 return (
@@ -1958,6 +1965,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                       <span className={`${isMobile?"text-base":"text-sm"} ${cardDone?"line-through text-slate-400":"text-slate-700"}`}>{c.title}</span>
                       <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                         {overdue && <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {isoToLabel(c.due_date)}</span>}
+                        {c.due_date > viewDate && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">Due {c.due_date === addDaysISO(viewDate, 1) && isToday ? "tomorrow" : isoToLong(c.due_date)}</span>}
                         {c.status === "inprogress" && <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS.inprogress}`}>{KANBAN_LABELS.inprogress}</span>}
                         <GoalChip goal={goals.find(g => g.id === c.goal_id)}/>
                       </div>
@@ -1967,7 +1975,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
               })}
             </div>
           </div>
-        )}
+        ))}
         <div className="flex gap-2">
           <input value={newTaskText} onChange={e=>setNewTaskText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTask()} placeholder="Add a task" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
           <button onClick={addTask} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"><Plus size={16}/></button>
