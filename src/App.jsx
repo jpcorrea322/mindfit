@@ -86,16 +86,6 @@ function GoalChip({ goal, label }) {
   );
 }
 
-// Adds or removes a card/milestone from today's daily list
-function PlanTodayButton({ planned, onClick, className = "" }) {
-  return (
-    <button onClick={onClick} title={planned ? "Remove from today's tasks" : "Add to today's tasks"}
-      className={`text-xs font-medium rounded border touch-manipulation flex items-center justify-center gap-1 ${planned ? "bg-cyan-50 border-cyan-200 text-cyan-700" : "bg-white border-slate-200 text-slate-500 hover:bg-slate-100"} ${className}`}>
-      {planned ? <Check size={12}/> : <Plus size={12}/>} Today
-    </button>
-  );
-}
-
 //  Auth Screen 
 function AuthScreen() {
   const [mode, setMode]       = useState("login");
@@ -342,11 +332,7 @@ export default function App() {
     saveDailyTasks({ ...dailyTasks, [date]: { tasks: [...items.filter(t => !t.habitId), { id: Date.now(), text, status: "pending", source }, ...items.filter(t => t.habitId)] } });
   };
 
-  const unplanSource = (source, date = todayISO()) => {
-    const items = dailyTasks[date]?.tasks || [];
-    saveDailyTasks({ ...dailyTasks, [date]: { tasks: items.filter(t => !sameSource(t.source, source)) } });
-  };
-  const links = { setSourceDone, moveKanbanCard, renameSource, planSource, unplanSource };
+  const links = { setSourceDone, moveKanbanCard, renameSource, planSource };
 
   //  Habits 
   const loadHabits = async () => {
@@ -1722,8 +1708,8 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
           options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}]}/>
       </div>
       {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit} kanbanCards={kanbanCards} goals={goals} links={links}/>}
-      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals} dailyTasks={dailyTasks} links={links}/>}
-      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} dailyTasks={dailyTasks} links={links}/>}
+      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals} links={links}/>}
+      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} links={links}/>}
     </div>
   );
 }
@@ -2122,7 +2108,7 @@ const currentBucketStart = () => { const d = new Date(); d.setDate(d.getDate() -
 const cardDoneDate = (c) => c.completed_at ? toISO(new Date(c.completed_at)) : (c.due_date || (c.created_at ? toISO(new Date(c.created_at)) : todayISO()));
 const isArchivedCard = (c, bucketStart) => c.status === "done" && cardDoneDate(c) < bucketStart;
 
-function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, dailyTasks, links }) {
+function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, links }) {
   const [newGoal, setNewGoal]           = useState("");
   const [editCardGoal, setEditCardGoal] = useState("");
   const goalOf = (card) => goals.find(g => g.id === card.goal_id);
@@ -2193,8 +2179,6 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
       </div>
     );
     const goal = goalOf(card);
-    const source = { type: "kanban", cardId: card.id };
-    const planned = isPlannedOn(dailyTasks, todayISO(), source);
     return (
       <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100" style={goal ? { borderLeft: `3px solid ${goalHex(goal)}` } : undefined}>
         <div className="flex items-start justify-between gap-1 mb-2">
@@ -2208,7 +2192,6 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
         </div>
         <div className="flex flex-wrap items-center gap-1.5">{dueBadge(card)}<GoalChip goal={goal}/></div>
         <div className="flex gap-1 mt-2">
-          {status !== "done" && <PlanTodayButton planned={planned} onClick={() => planned ? links.unplanSource(source) : links.planSource(source, card.title)} className={`px-2 ${isMobile?"py-2":"py-1"}`}/>}
           {prevStatus && <button onClick={() => moveCard(card, prevStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
           {nextStatus && <button onClick={() => moveCard(card, nextStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
         </div>
@@ -2393,7 +2376,7 @@ const goalProgressLabel = (p) => !p.total ? "No milestones yet"
   : [p.msTotal ? `${p.msDone} of ${p.msTotal} milestones` : null, p.cardsTotal ? `${p.cardsDone} of ${p.cardsTotal} cards` : null].filter(Boolean).join(" · ");
 const newMilestone = (text) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, text, done: false });
 
-function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, dailyTasks, links }) {
+function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, links }) {
   const [showForm, setShowForm]     = useState(false);
   const [editGoal, setEditGoal]     = useState(null);
   const [title, setTitle]           = useState("");
@@ -2525,8 +2508,6 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, dai
               </div>
               <div className="mt-3 space-y-1">
                 {(g.milestones || []).map(m => {
-                  const source = { type: "milestone", goalId: g.id, milestoneId: m.id };
-                  const planned = isPlannedOn(dailyTasks, today, source);
                   return (
                     <div key={m.id} className="flex items-center gap-1">
                       <button onClick={() => toggleMilestone(g, m)} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
@@ -2536,7 +2517,6 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, dai
                         <span className={`flex-1 text-sm ${m.done ? "line-through text-slate-400" : "text-slate-700"}`}>{m.text}</span>
                         {m.done && m.done_at && <span className="text-xs text-slate-400">{isoToLabel(toISO(new Date(m.done_at)))}</span>}
                       </button>
-                      {!m.done && <PlanTodayButton planned={planned} onClick={() => planned ? links.unplanSource(source) : links.planSource(source, m.text)} className="px-2 py-1.5 flex-shrink-0"/>}
                     </div>
                   );
                 })}
@@ -2547,7 +2527,6 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, dai
                   {prog.cards.map(c => {
                     const cardDone = c.status === "done";
                     const source = { type: "kanban", cardId: c.id };
-                    const planned = isPlannedOn(dailyTasks, today, source);
                     return (
                       <div key={c.id} className="flex items-center gap-1">
                         <button onClick={() => links.setSourceDone(source, !cardDone)} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
@@ -2559,7 +2538,6 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, dai
                             ? c.completed_at && <span className="text-xs text-slate-400">{isoToLabel(stampISO(c.completed_at))}</span>
                             : <span className={`text-xs flex-shrink-0 ${c.due_date && c.due_date < today ? "text-red-500 font-medium" : "text-slate-400"}`}>{c.due_date ? `${c.due_date < today ? "Overdue" : "Due"} ${isoToLabel(c.due_date)}` : KANBAN_LABELS[c.status]}</span>}
                         </button>
-                        {!cardDone && <PlanTodayButton planned={planned} onClick={() => planned ? links.unplanSource(source) : links.planSource(source, c.title)} className="px-2 py-1.5 flex-shrink-0"/>}
                       </div>
                     );
                   })}
