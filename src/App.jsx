@@ -56,6 +56,36 @@ const habitStreak  = (dailyTasks, habitId, fromISO) => {
 
 const isoToLabel = (iso) => { if (!iso) return ""; const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
+// A daily task can be planned from a Kanban card or a goal milestone. It then carries
+// source = { type: "kanban", cardId } or { type: "milestone", goalId, milestoneId }.
+// The card or milestone stays the record of its title and completion; the daily task is that day's plan to work on it.
+const goalHex = (g) => GOAL_COLORS.find(c => c.id === g?.color)?.hex || "#666";
+const stampISO = (ts) => ts ? toISO(new Date(ts)) : null;
+const sameSource = (a, b) => !!a && !!b && a.type === b.type
+  && (a.type === "kanban" ? a.cardId === b.cardId : a.goalId === b.goalId && a.milestoneId === b.milestoneId);
+// Looks a source up; null when the card or milestone has since been deleted (the task then behaves as a plain one)
+const resolveSource = (source, kanbanCards, goals) => {
+  if (!source) return null;
+  if (source.type === "kanban") {
+    const card = kanbanCards.find(c => c.id === source.cardId);
+    return card ? { kind: "kanban", title: card.title, done: card.status === "done", goal: goals.find(g => g.id === card.goal_id) || null } : null;
+  }
+  const goal = goals.find(g => g.id === source.goalId);
+  const m = (goal?.milestones || []).find(x => x.id === source.milestoneId);
+  return m ? { kind: "milestone", title: m.text, done: !!m.done, goal } : null;
+};
+const isPlannedOn = (dailyTasks, iso, source) => tasksOn(dailyTasks, iso).some(t => sameSource(t.source, source));
+
+function GoalChip({ goal, label }) {
+  if (!goal && !label) return null;
+  return (
+    <span className="inline-flex items-center gap-1 max-w-[11rem] text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 align-middle">
+      {goal && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: goalHex(goal) }}/>}
+      <span className="truncate">{label || goal.title}</span>
+    </span>
+  );
+}
+
 //  Auth Screen 
 function AuthScreen() {
   const [mode, setMode]       = useState("login");
@@ -194,11 +224,12 @@ export default function App() {
     return next;
   };
 
+  // Only the days that changed are written
   const saveDailyTasks = async (next) => {
-    setDailyTasks(next);
-    const upserts = Object.entries(next).map(([date, { tasks }]) => ({
+    const upserts = Object.entries(next).filter(([date, day]) => day !== dailyTasks[date]).map(([date, { tasks }]) => ({
       user_id: uid(), date, tasks, updated_at: new Date().toISOString()
     }));
+    setDailyTasks(next);
     if (upserts.length > 0) {
       await supabase.from("tasks_daily").upsert(upserts, { onConflict: "user_id,date" });
     }
@@ -256,6 +287,52 @@ export default function App() {
     await supabase.from("tasks_goals").delete().eq("id", id).eq("user_id", uid());
     setGoals(prev => prev.filter(g => g.id !== id));
   };
+
+  //  Links between Daily, Kanban and Goals 
+  // Completes or reopens a card/milestone and keeps the daily list in step with it.
+  // `at` is the daily task being checked ({ date, taskId, status }); today's other tasks planned from the same source follow along.
+  const setSourceDone = async (source, done, at) => {
+    const next = { ...dailyTasks };
+    const patch = (date, fn) => {
+      const items = next[date]?.tasks;
+      if (!items) return;
+      const mapped = items.map(fn);
+      if (mapped.some((t, i) => t !== items[i])) next[date] = { tasks: mapped };
+    };
+    if (at) patch(at.date, t => t.id === at.taskId ? { ...t, status: at.status } : t);
+    patch(todayISO(), t => sameSource(t.source, source) && t.status === (done ? "pending" : "complete") ? { ...t, status: done ? "complete" : "pending" } : t);
+    saveDailyTasks(next);
+
+    if (source.type === "kanban") {
+      const card = kanbanCards.find(c => c.id === source.cardId);
+      if (card && (card.status === "done") !== done)
+        await updateKanbanCard(card.id, { status: done ? "done" : "inprogress", completed_at: done ? new Date().toISOString() : null });
+    } else {
+      const goal = goals.find(g => g.id === source.goalId);
+      const m = (goal?.milestones || []).find(x => x.id === source.milestoneId);
+      if (m && !!m.done !== done)
+        await updateGoal(goal.id, { milestones: goal.milestones.map(x => x.id === m.id ? { ...x, done, done_at: done ? new Date().toISOString() : null } : x) });
+    }
+  };
+
+  const moveKanbanCard = (card, status) => (status === "done") !== (card.status === "done")
+    ? setSourceDone({ type: "kanban", cardId: card.id }, status === "done")
+    : updateKanbanCard(card.id, { status });
+
+  const renameSource = (source, text) => {
+    if (source.type === "kanban") return updateKanbanCard(source.cardId, { title: text });
+    const goal = goals.find(g => g.id === source.goalId);
+    if (goal) return updateGoal(goal.id, { milestones: (goal.milestones || []).map(x => x.id === source.milestoneId ? { ...x, text } : x) });
+  };
+
+  // Puts a card or milestone on a day's task list (kept ahead of the habit check-offs stored after the tasks)
+  const planSource = (source, text, date = todayISO()) => {
+    const items = dailyTasks[date]?.tasks || [];
+    if (items.some(t => sameSource(t.source, source))) return;
+    saveDailyTasks({ ...dailyTasks, [date]: { tasks: [...items.filter(t => !t.habitId), { id: Date.now(), text, status: "pending", source }, ...items.filter(t => t.habitId)] } });
+  };
+
+  const links = { setSourceDone, moveKanbanCard, renameSource, planSource };
 
   //  Habits 
   const loadHabits = async () => {
@@ -347,10 +424,11 @@ export default function App() {
             goals={goals}
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
             habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
+            links={links}
           />
         )}
         {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
-        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} />}
+        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} kanbanCards={kanbanCards} goals={goals} />}
         {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>}
       </main>
     </div>
@@ -1166,7 +1244,7 @@ function MetricPills({ entry }) {
   );
 }
 
-function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
+function MoodTab({ session, isMobile, dailyTasks = {}, habits = [], kanbanCards = [], goals = [] }) {
   const [moodEntries, setMoodEntries]   = useState([]);
   const [formEntry, setFormEntry]       = useState(null);
   const [detailDate, setDetailDate]     = useState(null);
@@ -1298,7 +1376,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
       )}
 
       {view === "calendar" && selectedDate && (
-        <DayPanel iso={selectedDate} entry={entryByDate[selectedDate]} dailyTasks={dailyTasks} habits={habits}
+        <DayPanel iso={selectedDate} entry={entryByDate[selectedDate]} dailyTasks={dailyTasks} habits={habits} kanbanCards={kanbanCards} goals={goals}
           onDetails={() => setDetailDate(selectedDate)}
           onCheckIn={() => setFormEntry(entryByDate[selectedDate] || { date: selectedDate })}/>
       )}
@@ -1352,7 +1430,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
       )}
 
       {detailDate && entryByDate[detailDate] && (
-        <DayDetail entry={entryByDate[detailDate]} habits={habits} dailyTasks={dailyTasks}
+        <DayDetail entry={entryByDate[detailDate]} habits={habits} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals}
           onEdit={(entry) => { setDetailDate(null); setFormEntry(entry); }}
           onClose={() => setDetailDate(null)} />
       )}
@@ -1368,7 +1446,7 @@ function MoodTab({ session, isMobile, dailyTasks = {}, habits = [] }) {
   );
 }
 
-function DayDetail({ entry, onEdit, onClose, habits, dailyTasks }) {
+function DayDetail({ entry, onEdit, onClose, habits, dailyTasks, kanbanCards, goals }) {
   const colors = MOOD_COLORS(entry.mood);
   return (
     <Sheet title={isoToLong(entry.date)} onClose={onClose}>
@@ -1393,7 +1471,7 @@ function DayDetail({ entry, onEdit, onClose, habits, dailyTasks }) {
       {(entry.tags||[]).length > 0 && <div className="flex gap-2 flex-wrap mb-4">{entry.tags.map(tag => <span key={tag} className={`px-3 py-1 rounded-full text-sm font-medium ${colors.light} ${colors.text}`}>{tag}</span>)}</div>}
       {entry.note && <div className="bg-slate-50 rounded-lg p-3 mb-4"><p className="text-sm text-slate-600 italic">"{entry.note}"</p></div>}
       <div className="border-t border-slate-100 pt-4">
-        <DayTasks iso={entry.date} dailyTasks={dailyTasks} habits={habits}/>
+        <DayTasks iso={entry.date} dailyTasks={dailyTasks} habits={habits} kanbanCards={kanbanCards} goals={goals}/>
       </div>
     </Sheet>
   );
@@ -1406,10 +1484,18 @@ const TASK_STATUS_STYLES = {
 };
 
 // A day's tasks and habit check-offs from the Tasks tab, read-only
-function DayTasks({ iso, dailyTasks, habits }) {
+function DayTasks({ iso, dailyTasks, habits, kanbanCards = [], goals = [] }) {
   const dayTasks = tasksOn(dailyTasks, iso);
   const tasksDone = dayTasks.filter(t => t.status === "complete").length;
   const doneHabitIds = habitsDoneOn(dailyTasks, iso);
+  // Cards and milestones finished this day that aren't already on its task list
+  const listed = (source) => dayTasks.some(t => sameSource(t.source, source));
+  const alsoDone = [
+    ...kanbanCards.filter(c => c.status === "done" && stampISO(c.completed_at) === iso && !listed({ type: "kanban", cardId: c.id }))
+      .map(c => ({ key: `c-${c.id}`, text: c.title, goal: goals.find(g => g.id === c.goal_id), label: "Kanban" })),
+    ...goals.flatMap(g => (g.milestones || []).filter(m => m.done && stampISO(m.done_at) === iso && !listed({ type: "milestone", goalId: g.id, milestoneId: m.id }))
+      .map(m => ({ key: `m-${m.id}`, text: m.text, goal: g }))),
+  ];
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
@@ -1423,15 +1509,29 @@ function DayTasks({ iso, dailyTasks, habits }) {
             {dayTasks.map(t => {
               const st = TASK_STATUS_STYLES[t.status] || TASK_STATUS_STYLES.pending;
               const Icon = st.icon;
+              const src = resolveSource(t.source, kanbanCards, goals);
               return (
                 <li key={t.id} className="flex items-start gap-2.5">
                   <span className={`mt-0.5 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${st.dot}`}>{Icon && <Icon size={10} strokeWidth={3}/>}</span>
-                  <span className="text-sm"><span className={st.text}>{t.text}</span>{t.status === "skipped" && <span className="ml-1.5 text-xs text-slate-400">skipped</span>}</span>
+                  <span className="text-sm"><span className={st.text}>{src?.title || t.text}</span>{t.status === "skipped" && <span className="ml-1.5 text-xs text-slate-400">skipped</span>}{src && <span className="ml-1.5"><GoalChip goal={src.goal} label={src.goal ? null : "Kanban"}/></span>}</span>
                 </li>
               );
             })}
           </ul>
         )}
+      {alsoDone.length > 0 && (
+        <>
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-4 mb-2">Also finished</p>
+          <ul className="space-y-1.5">
+            {alsoDone.map(x => (
+              <li key={x.key} className="flex items-start gap-2.5">
+                <span className={`mt-0.5 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${TASK_STATUS_STYLES.complete.dot}`}><Check size={10} strokeWidth={3}/></span>
+                <span className="text-sm"><span className="text-slate-700">{x.text}</span><span className="ml-1.5"><GoalChip goal={x.goal} label={x.goal ? null : x.label}/></span></span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {habits.length > 0 && (
         <>
           <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-4 mb-2">Habits</p>
@@ -1452,7 +1552,7 @@ function DayTasks({ iso, dailyTasks, habits }) {
 }
 
 // Summary of the day picked on the mood calendar: its check-in plus what got done
-function DayPanel({ iso, entry, dailyTasks, habits, onDetails, onCheckIn }) {
+function DayPanel({ iso, entry, dailyTasks, habits, kanbanCards, goals, onDetails, onCheckIn }) {
   const today = todayISO();
   const rel = iso === today ? "Today" : iso === addDaysISO(today, -1) ? "Yesterday" : null;
   const colors = entry ? MOOD_COLORS(entry.mood) : null;
@@ -1473,7 +1573,7 @@ function DayPanel({ iso, entry, dailyTasks, habits, onDetails, onCheckIn }) {
       </div>
       {entry && <div className="-mt-2 mb-4"><MetricPills entry={entry}/></div>}
       <div className="border-t border-slate-100 pt-4">
-        <DayTasks iso={iso} dailyTasks={dailyTasks} habits={habits}/>
+        <DayTasks iso={iso} dailyTasks={dailyTasks} habits={habits} kanbanCards={kanbanCards} goals={goals}/>
       </div>
     </div>
   );
@@ -1599,7 +1699,7 @@ function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
 // 
 // TASKS TAB
 // 
-function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit }) {
+function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
   const [section, setSection] = useState("daily");
   return (
     <div>
@@ -1607,14 +1707,24 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
         <Segmented value={section} onChange={setSection}
           options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}]}/>
       </div>
-      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}/>}
-      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}/>}
-      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}/>}
+      {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit} kanbanCards={kanbanCards} goals={goals} links={links}/>}
+      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals} links={links}/>}
+      {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} links={links}/>}
     </div>
   );
 }
 
-function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, deleteHabit }) {
+// Cards due on a day. Today also carries everything overdue, including overdue cards finished today so they can be unticked.
+const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => c.due_date && (c.due_date === iso
+  || (iso === todayISO() && c.due_date < iso && (c.status !== "done" || stampISO(c.completed_at) === iso))));
+
+// Cards due in the six days after a day: a heads-up list, not part of that day's own tally.
+// Only for today onwards; a card finished early stays listed on the day it was finished so it can be unticked.
+const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => c.due_date && c.due_date > iso && c.due_date <= addDaysISO(iso, 6)
+  && (c.status !== "done" || stampISO(c.completed_at) === iso));
+
+function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, deleteHabit, kanbanCards, goals, links }) {
+  const [showPicker, setShowPicker] = useState(false);
   const [viewDate, setViewDate]     = useState(todayISO());
   const [newTaskText, setNewTaskText] = useState("");
   const [editingTask, setEditingTask] = useState(null);
@@ -1630,9 +1740,31 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
   const putTasks = (nextTasks) => saveDailyTasks({ ...dailyTasks, [viewDate]: { tasks: [...nextTasks, ...habitItems] } });
   const isToday = viewDate === todayISO();
   const isTom   = viewDate === tomorrow();
-  const done    = tasks.filter(t=>t.status==="complete").length;
+  // Kanban cards due this day show up on their own, unless they're already planned as one of its tasks
+  const dueCards = cardsDueOn(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
+    .sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const upcomingCards = cardsComingUp(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
+    .sort((a, b) => a.due_date.localeCompare(b.due_date));
+  const dueDone = dueCards.filter(c => c.status === "done").length;
+  const total   = tasks.length + dueCards.length;
+  const done    = tasks.filter(t=>t.status==="complete").length + dueDone;
   const skipped = tasks.filter(t=>t.status==="skipped").length;
-  const pending = tasks.filter(t=>t.status==="pending").length;
+  const pending = tasks.filter(t=>t.status==="pending").length + dueCards.length - dueDone;
+
+  // Open milestones and cards that could be pulled onto this day
+  const pickable = [
+    ...goals.map(g => ({
+      key: g.id, goal: g, title: g.title,
+      items: [
+        ...(g.milestones || []).filter(m => !m.done).map(m => ({ key: `m-${m.id}`, text: m.text, source: { type: "milestone", goalId: g.id, milestoneId: m.id } })),
+        ...kanbanCards.filter(c => c.goal_id === g.id && c.status !== "done").map(c => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } })),
+      ],
+    })),
+    { key: "board", goal: null, title: "Kanban board",
+      items: kanbanCards.filter(c => c.status !== "done" && !goals.some(g => g.id === c.goal_id)).map(c => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } })) },
+  ].map(grp => ({ ...grp, items: grp.items.filter(i => !isPlannedOn(dailyTasks, viewDate, i.source) && !dueCards.some(c => c.id === i.card?.id)) }))
+   .filter(grp => grp.items.length > 0);
+  const hasLinkables = goals.some(g => (g.milestones || []).length) || kanbanCards.length > 0;
 
   const days14 = Array.from({length:14}, (_,i) => { const d=new Date(); d.setDate(d.getDate()-7+i); const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; });
 
@@ -1649,14 +1781,24 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
     setNewTaskText("");
   };
 
+  const sourceOf = (t) => resolveSource(t.source, kanbanCards, goals);
+
+  // Renaming a planned task renames the card or milestone it came from
   const saveTaskEdit = (taskId) => {
-    if (!editText.trim()) return;
-    putTasks(tasks.map(t => t.id === taskId ? { ...t, text: editText.trim() } : t));
+    const text = editText.trim();
+    if (!text) return;
+    const t = tasks.find(x => x.id === taskId);
+    putTasks(tasks.map(x => x.id === taskId ? { ...x, text } : x));
+    if (t && sourceOf(t)) links.renameSource(t.source, text);
     setEditingTask(null);
   };
 
+  // Checking or unchecking a planned task completes or reopens its card/milestone; skipping only affects the day
   const setStatus = (taskId, status) => {
-    putTasks(tasks.map(t => t.id===taskId?{...t,status}:t));
+    const t = tasks.find(x => x.id === taskId);
+    if (t && sourceOf(t) && (status === "complete") !== (t.status === "complete"))
+      links.setSourceDone(t.source, status === "complete", { date: viewDate, taskId, status });
+    else putTasks(tasks.map(x => x.id===taskId?{...x,status}:x));
   };
 
   const deleteTask = (taskId) => {
@@ -1700,8 +1842,10 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
           <div className="flex gap-1 pb-2 min-w-max">
             {days14.map(d => {
               const t = tasksOn(dailyTasks, d);
-              const allDone = t.length>0 && t.every(x=>x.status==="complete");
-              const hasPending = t.some(x=>x.status==="pending");
+              const due = cardsDueOn(kanbanCards, d).filter(c => !isPlannedOn(dailyTasks, d, { type: "kanban", cardId: c.id }));
+              const dueOpen = due.some(c => c.status !== "done");
+              const allDone = t.length+due.length>0 && t.every(x=>x.status==="complete") && !dueOpen;
+              const hasPending = t.some(x=>x.status==="pending") || dueOpen;
               const isActive = d===viewDate;
               const isT = d===todayISO();
               return (
@@ -1709,7 +1853,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                   className={`flex-shrink-0 flex flex-col items-center px-2 py-2 rounded-lg text-xs transition-all min-w-[48px] touch-manipulation border ${isActive?"bg-blue-600 text-white border-blue-600":isT?"border-blue-300 text-blue-600 bg-blue-50":"border-transparent text-slate-500 hover:bg-slate-50"}`}>
                   <span className="text-xs opacity-70">{new Date(d+"T00:00:00").toLocaleDateString("en-US",{weekday:"narrow"})}</span>
                   <span className="font-semibold text-sm">{new Date(d+"T00:00:00").getDate()}</span>
-                  <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${allDone?"bg-emerald-400":hasPending?"bg-amber-400":t.length>0?"bg-red-400":"bg-transparent"}`}/>
+                  <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${allDone?"bg-emerald-400":hasPending?"bg-amber-400":t.length+due.length>0?"bg-red-400":"bg-transparent"}`}/>
                 </button>
               );
             })}
@@ -1721,18 +1865,21 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="font-bold text-slate-800">{isToday?"Today":isTom?"Tomorrow":isoToLabel(viewDate)}</h3>
-            {tasks.length>0 && <p className="text-xs text-slate-400 mt-0.5">{done} done  {pending} pending  {skipped} skipped</p>}
+            {total>0 && <p className="text-xs text-slate-400 mt-0.5">{done} done  {pending} pending  {skipped} skipped</p>}
           </div>
-          {tasks.length>0 && (
+          {total>0 && (
             <div className="h-2 w-24 bg-slate-100 rounded-full overflow-hidden">
-              <div className="h-full bg-emerald-500 rounded-full transition-all" style={{width:`${tasks.length?Math.round(done/tasks.length*100):0}%`}}/>
+              <div className="h-full bg-emerald-500 rounded-full transition-all" style={{width:`${Math.round(done/total*100)}%`}}/>
             </div>
           )}
         </div>
-        {tasks.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
+        {total===0 && upcomingCards.length===0 && <p className="text-slate-400 text-sm text-center py-4">No tasks for this day yet.</p>}
         {isMobile && tasks.length>0 && <p className="text-xs text-slate-400 -mt-2 mb-3">Tap a task to edit, skip or delete it. Drag the handle to reorder.</p>}
         <div className="space-y-2 mb-4">
           {shownTasks.map(t => {
+            const src = sourceOf(t);
+            const label = src?.title || t.text;
+            const chip = src && <GoalChip goal={src.goal} label={src.goal ? null : "Kanban"}/>;
             return (
               <div key={t.id} ref={el => { rowRefs.current[t.id] = el; }}
                 className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-colors ${dragId===t.id?"ring-2 ring-blue-400 shadow-lg relative z-10":""} ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
@@ -1755,7 +1902,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                         <button onClick={() => { setStatus(t.id, t.status==="skipped"?"pending":"skipped"); setEditingTask(null); }}
                           className="flex-1 py-2 text-sm font-medium rounded-lg bg-slate-100 text-slate-600">{t.status==="skipped" ? "Unskip" : "Skip today"}</button>
                         <button onClick={() => { deleteTask(t.id); setEditingTask(null); }}
-                          className="flex-1 py-2 text-sm font-medium rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center gap-1"><Trash2 size={14}/> Delete</button>
+                          className="flex-1 py-2 text-sm font-medium rounded-lg bg-rose-50 text-rose-600 flex items-center justify-center gap-1"><Trash2 size={14}/> {src ? "Remove" : "Delete"}</button>
                       </div>
                     )}
                   </div>
@@ -1782,15 +1929,17 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                       </button>
                     )}
                     {isMobile ? (
-                      <button onClick={() => { setEditingTask(t.id); setEditText(t.text); }} className="flex-1 min-w-0 text-left py-1 touch-manipulation">
-                        <span className={`text-base ${t.status!=="pending"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
+                      <button onClick={() => { setEditingTask(t.id); setEditText(label); }} className="flex-1 min-w-0 text-left py-1 touch-manipulation">
+                        <span className={`text-base ${t.status!=="pending"?"line-through text-slate-400":"text-slate-700"}`}>{label}</span>
                         {t.status==="skipped" && <span className="ml-2 text-xs text-slate-400">skipped</span>}
+                        {chip && <span className="block mt-0.5">{chip}</span>}
                       </button>
                     ) : (
                       <>
-                        <span className={`flex-1 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{t.text}</span>
-                        <button onClick={() => { setEditingTask(t.id); setEditText(t.text); }} className="p-0.5 text-slate-300 hover:text-blue-600 flex-shrink-0" title="Edit task"><Edit2 size={14}/></button>
-                        <button onClick={()=>deleteTask(t.id)} className="p-0.5 text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete task"><Trash2 size={14}/></button>
+                        <span className={`flex-1 min-w-0 text-sm ${t.status==="complete"?"line-through text-slate-400":t.status==="skipped"?"line-through text-slate-400":"text-slate-700"}`}>{label}</span>
+                        {chip}
+                        <button onClick={() => { setEditingTask(t.id); setEditText(label); }} className="p-0.5 text-slate-300 hover:text-blue-600 flex-shrink-0" title="Edit task"><Edit2 size={14}/></button>
+                        <button onClick={()=>deleteTask(t.id)} className="p-0.5 text-slate-300 hover:text-red-400 flex-shrink-0" title={src ? "Remove from this day" : "Delete task"}><Trash2 size={14}/></button>
                       </>
                     )}
                   </>
@@ -1799,10 +1948,67 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
             );
           })}
         </div>
+        {[["Due on the Kanban board", dueCards], ["Coming up this week", upcomingCards]].map(([heading, cards]) => cards.length > 0 && (
+          <div key={heading} className="mb-4">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">{heading}</p>
+            <div className="space-y-2">
+              {cards.map(c => {
+                const cardDone = c.status === "done";
+                const overdue = !cardDone && c.due_date < todayISO();
+                return (
+                  <div key={c.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border ${cardDone?"bg-emerald-50 border-emerald-100 opacity-75":"bg-white border-slate-200"}`}>
+                    <button onClick={() => links.setSourceDone({ type: "kanban", cardId: c.id }, !cardDone)} aria-label={cardDone ? "Reopen card" : "Mark card done"}
+                      className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${cardDone?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
+                      <Check size={isMobile?15:12}/>
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <span className={`${isMobile?"text-base":"text-sm"} ${cardDone?"line-through text-slate-400":"text-slate-700"}`}>{c.title}</span>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        {overdue && <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {isoToLabel(c.due_date)}</span>}
+                        {c.due_date > viewDate && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">Due {c.due_date === addDaysISO(viewDate, 1) && isToday ? "tomorrow" : isoToLong(c.due_date)}</span>}
+                        {c.status === "inprogress" && <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS.inprogress}`}>{KANBAN_LABELS.inprogress}</span>}
+                        <GoalChip goal={goals.find(g => g.id === c.goal_id)}/>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
         <div className="flex gap-2">
           <input value={newTaskText} onChange={e=>setNewTaskText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTask()} placeholder="Add a task" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
           <button onClick={addTask} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"><Plus size={16}/></button>
         </div>
+        {hasLinkables && (
+          <div className="mt-3">
+            <button onClick={() => setShowPicker(v => !v)} className="flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 py-1">
+              <Flag size={14}/> Add from goals and Kanban {showPicker ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+            </button>
+            {showPicker && (
+              <div className="mt-2 space-y-3">
+                {pickable.length === 0 && <p className="text-sm text-slate-400">Nothing open left to add for this day.</p>}
+                {pickable.map(grp => (
+                  <div key={grp.key}>
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 mb-1">
+                      {grp.goal && <span className="w-2 h-2 rounded-full" style={{ background: goalHex(grp.goal) }}/>}{grp.title}
+                    </p>
+                    <div className="space-y-1">
+                      {grp.items.map(i => (
+                        <button key={i.key} onClick={() => links.planSource(i.source, i.text, viewDate)}
+                          className={`w-full flex items-center gap-2 px-3 ${isMobile?"py-2.5":"py-1.5"} rounded-lg border border-slate-200 hover:bg-slate-50 text-left touch-manipulation`}>
+                          <Plus size={14} className="text-slate-400 flex-shrink-0"/>
+                          <span className="flex-1 min-w-0 text-sm text-slate-700 truncate">{i.text}</span>
+                          <span className="text-xs text-slate-400 flex-shrink-0">{i.card ? (i.card.due_date ? `Card · due ${isoToLabel(i.card.due_date)}` : "Card") : "Milestone"}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
       <HabitsCard habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
         dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} viewDate={viewDate} isMobile={isMobile}/>
@@ -1910,7 +2116,16 @@ const currentBucketStart = () => { const d = new Date(); d.setDate(d.getDate() -
 const cardDoneDate = (c) => c.completed_at ? toISO(new Date(c.completed_at)) : (c.due_date || (c.created_at ? toISO(new Date(c.created_at)) : todayISO()));
 const isArchivedCard = (c, bucketStart) => c.status === "done" && cardDoneDate(c) < bucketStart;
 
-function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard }) {
+function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, links }) {
+  const [newGoal, setNewGoal]           = useState("");
+  const [editCardGoal, setEditCardGoal] = useState("");
+  const goalOf = (card) => goals.find(g => g.id === card.goal_id);
+  const goalSelect = (value, onChange, cls) => goals.length > 0 && (
+    <select value={value} onChange={e => onChange(e.target.value)} aria-label="Goal" className={cls}>
+      <option value="">No goal</option>
+      {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
+    </select>
+  );
   const [kanbanView, setKanbanView]   = useState("board");
   const [showAddCard, setShowAddCard] = useState(false);
   const [newTitle, setNewTitle]       = useState("");
@@ -1936,15 +2151,15 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
 
   const handleAdd = async () => {
     if (!newTitle.trim()) return;
-    await addKanbanCard({ title: newTitle.trim(), status: newStatus, due_date: newDue||null, completed_at: newStatus === "done" ? new Date().toISOString() : null });
-    setNewTitle(""); setNewDue(""); setNewStatus("todo"); setShowAddCard(false);
+    await addKanbanCard({ title: newTitle.trim(), status: newStatus, due_date: newDue||null, goal_id: newGoal||null, completed_at: newStatus === "done" ? new Date().toISOString() : null });
+    setNewTitle(""); setNewDue(""); setNewStatus("todo"); setNewGoal(""); setShowAddCard(false);
   };
 
-  const moveCard = (card, status) => updateKanbanCard(card.id, { status, completed_at: status === "done" ? new Date().toISOString() : null });
+  const moveCard = links.moveKanbanCard;
 
   const saveCardEdit = async (cardId) => {
     if (!editCardTitle.trim()) return;
-    await updateKanbanCard(cardId, { title: editCardTitle.trim(), due_date: editCardDue || null });
+    await updateKanbanCard(cardId, { title: editCardTitle.trim(), due_date: editCardDue || null, goal_id: editCardGoal || null });
     setEditingCard(null);
   };
 
@@ -1964,24 +2179,26 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
         <input value={editCardTitle} onChange={e => setEditCardTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && saveCardEdit(card.id)}
           className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500" placeholder="Card title" autoFocus/>
         <input type="date" value={editCardDue} onChange={e => setEditCardDue(e.target.value)} className="w-full px-2 py-1 text-sm border border-slate-200 rounded"/>
+        {goalSelect(editCardGoal, setEditCardGoal, "w-full px-2 py-1 text-sm border border-slate-200 rounded bg-white")}
         <div className="flex gap-1">
           <button onClick={() => saveCardEdit(card.id)} className="flex-1 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 font-medium">Save</button>
           <button onClick={() => setEditingCard(null)} className="flex-1 py-1 text-xs bg-slate-200 text-slate-600 rounded hover:bg-slate-300">Cancel</button>
         </div>
       </div>
     );
+    const goal = goalOf(card);
     return (
-      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100" style={goal ? { borderLeft: `3px solid ${goalHex(goal)}` } : undefined}>
         <div className="flex items-start justify-between gap-1 mb-2">
           <span className={`text-sm font-medium leading-tight flex-1 ${status==="done"?"text-slate-500 line-through":"text-slate-800"}`}>{card.title}</span>
           <div className="flex gap-0.5 flex-shrink-0">
-            <button onClick={() => { setEditingCard(card.id); setEditCardTitle(card.title); setEditCardDue(card.due_date || ""); }}
+            <button onClick={() => { setEditingCard(card.id); setEditCardTitle(card.title); setEditCardDue(card.due_date || ""); setEditCardGoal(goalOf(card) ? card.goal_id : ""); }}
               className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 touch-manipulation`} title="Edit card"><Edit2 size={14}/></button>
             <button onClick={() => deleteKanbanCard(card.id)}
               className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 touch-manipulation`} title="Delete card"><Trash2 size={14}/></button>
           </div>
         </div>
-        {dueBadge(card)}
+        <div className="flex flex-wrap items-center gap-1.5">{dueBadge(card)}<GoalChip goal={goal}/></div>
         <div className="flex gap-1 mt-2">
           {prevStatus && <button onClick={() => moveCard(card, prevStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
           {nextStatus && <button onClick={() => moveCard(card, nextStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
@@ -2058,6 +2275,7 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
                   <div key={card.id} className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-100">
                     <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS[card.status]}`}>{KANBAN_LABELS[card.status]}</span>
                     <span className="text-sm text-slate-700 flex-1">{card.title}</span>
+                    <GoalChip goal={goalOf(card)}/>
                   </div>
                 ))}
               </div>
@@ -2078,6 +2296,7 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
               </select>
               <input type="date" value={newDue} onChange={e=>setNewDue(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
             </div>
+            {goalSelect(newGoal, setNewGoal, "w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white")}
             <div className="flex gap-2">
               <button onClick={handleAdd} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700">Add Card</button>
               <button onClick={()=>setShowAddCard(false)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm hover:bg-slate-200">Cancel</button>
@@ -2150,17 +2369,22 @@ function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard,
 }
 
 // Each goal picks how its progress is tracked; milestones is the only type so far.
+// Kanban cards linked to the goal count as steps alongside its milestones.
 const GOAL_TRACKING_TYPES = [
   { id: "milestones", label: "Milestones checklist" },
 ];
-const goalProgress = (g) => {
+const goalProgress = (g, kanbanCards = []) => {
   const ms = g.milestones || [];
-  const done = ms.filter(m => m.done).length;
-  return { done, total: ms.length, pct: ms.length ? Math.round(done / ms.length * 100) : 0, complete: ms.length > 0 && done === ms.length };
+  const cards = kanbanCards.filter(c => c.goal_id === g.id);
+  const msDone = ms.filter(m => m.done).length, cardsDone = cards.filter(c => c.status === "done").length;
+  const done = msDone + cardsDone, total = ms.length + cards.length;
+  return { done, total, pct: total ? Math.round(done / total * 100) : 0, complete: total > 0 && done === total, msDone, msTotal: ms.length, cardsDone, cardsTotal: cards.length, cards };
 };
+const goalProgressLabel = (p) => !p.total ? "No milestones yet"
+  : [p.msTotal ? `${p.msDone} of ${p.msTotal} milestones` : null, p.cardsTotal ? `${p.cardsDone} of ${p.cardsTotal} cards` : null].filter(Boolean).join(" · ");
 const newMilestone = (text) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, text, done: false });
 
-function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
+function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, links }) {
   const [showForm, setShowForm]     = useState(false);
   const [editGoal, setEditGoal]     = useState(null);
   const [title, setTitle]           = useState("");
@@ -2193,7 +2417,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
     cancel();
   };
 
-  const toggleMilestone = (g, id) => updateGoal(g.id, { milestones: (g.milestones || []).map(m => m.id === id ? { ...m, done: !m.done, done_at: m.done ? null : new Date().toISOString() } : m) });
+  const toggleMilestone = (g, m) => links.setSourceDone({ type: "milestone", goalId: g.id, milestoneId: m.id }, !m.done);
   const quickAddMilestone = (g) => {
     const text = (quickAdd[g.id] || "").trim();
     if (!text) return;
@@ -2201,7 +2425,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
     setQuickAdd(q => ({ ...q, [g.id]: "" }));
   };
 
-  const sortedGoals = [...goals].sort((a,b) => Number(goalProgress(a).complete) - Number(goalProgress(b).complete));
+  const sortedGoals = [...goals].sort((a,b) => Number(goalProgress(a, kanbanCards).complete) - Number(goalProgress(b, kanbanCards).complete));
 
   return (
     <div className="space-y-4">
@@ -2262,7 +2486,8 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
       )}
       {sortedGoals.map(g => {
         const gc = GOAL_COLORS.find(c=>c.id===g.color)?.hex || "#666";
-        const prog = goalProgress(g);
+        const prog = goalProgress(g, kanbanCards);
+        const today = todayISO();
         return (
           <div key={g.id} className={`bg-white rounded-xl border border-slate-200 overflow-hidden ${prog.complete ? "opacity-75" : ""}`}>
             <div className="h-1.5" style={{background:gc}}/>
@@ -2284,22 +2509,48 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal }) {
               {g.description && <p className="text-sm text-slate-500 ml-5">{g.description}</p>}
               <div className="mt-4">
                 <div className="flex items-center justify-between text-xs mb-1">
-                  <span className="font-medium text-slate-500">{prog.total ? `${prog.done} of ${prog.total} milestones` : "No milestones yet"}</span>
+                  <span className="font-medium text-slate-500">{goalProgressLabel(prog)}</span>
                   <span className="font-bold text-slate-700">{prog.pct}%</span>
                 </div>
                 <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full transition-all" style={{width:`${prog.pct}%`,background:gc}}/></div>
               </div>
               <div className="mt-3 space-y-1">
-                {(g.milestones || []).map(m => (
-                  <button key={m.id} onClick={() => toggleMilestone(g, m.id)} className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
-                    <div className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 transition-all ${m.done ? "border-transparent" : "border-slate-300 bg-white"}`} style={m.done ? {background:gc} : undefined}>
-                      {m.done && <Check size={12} className="text-white" strokeWidth={3}/>}
+                {(g.milestones || []).map(m => {
+                  return (
+                    <div key={m.id} className="flex items-center gap-1">
+                      <button onClick={() => toggleMilestone(g, m)} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
+                        <div className={`w-5 h-5 rounded-md flex items-center justify-center flex-shrink-0 border-2 transition-all ${m.done ? "border-transparent" : "border-slate-300 bg-white"}`} style={m.done ? {background:gc} : undefined}>
+                          {m.done && <Check size={12} className="text-white" strokeWidth={3}/>}
+                        </div>
+                        <span className={`flex-1 text-sm ${m.done ? "line-through text-slate-400" : "text-slate-700"}`}>{m.text}</span>
+                        {m.done && m.done_at && <span className="text-xs text-slate-400">{isoToLabel(toISO(new Date(m.done_at)))}</span>}
+                      </button>
                     </div>
-                    <span className={`flex-1 text-sm ${m.done ? "line-through text-slate-400" : "text-slate-700"}`}>{m.text}</span>
-                    {m.done && m.done_at && <span className="text-xs text-slate-400">{isoToLabel(toISO(new Date(m.done_at)))}</span>}
-                  </button>
-                ))}
+                  );
+                })}
               </div>
+              {prog.cards.length > 0 && (
+                <div className="mt-3 pt-3 border-t border-slate-100 space-y-1">
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-2 mb-1">Kanban cards</p>
+                  {prog.cards.map(c => {
+                    const cardDone = c.status === "done";
+                    const source = { type: "kanban", cardId: c.id };
+                    return (
+                      <div key={c.id} className="flex items-center gap-1">
+                        <button onClick={() => links.setSourceDone(source, !cardDone)} className="flex-1 min-w-0 flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-slate-50 text-left touch-manipulation">
+                          <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-all ${cardDone ? "border-transparent" : "border-slate-300 bg-white"}`} style={cardDone ? {background:gc} : undefined}>
+                            {cardDone && <Check size={12} className="text-white" strokeWidth={3}/>}
+                          </div>
+                          <span className={`flex-1 min-w-0 text-sm ${cardDone ? "line-through text-slate-400" : "text-slate-700"}`}>{c.title}</span>
+                          {cardDone
+                            ? c.completed_at && <span className="text-xs text-slate-400">{isoToLabel(stampISO(c.completed_at))}</span>
+                            : <span className={`text-xs flex-shrink-0 ${c.due_date && c.due_date < today ? "text-red-500 font-medium" : "text-slate-400"}`}>{c.due_date ? `${c.due_date < today ? "Overdue" : "Due"} ${isoToLabel(c.due_date)}` : KANBAN_LABELS[c.status]}</span>}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               <div className="flex gap-2 mt-2">
                 <input value={quickAdd[g.id] || ""} onChange={e => setQuickAdd(q => ({ ...q, [g.id]: e.target.value }))} onKeyDown={e => e.key === "Enter" && quickAddMilestone(g)}
                   placeholder="Add milestone" className="flex-1 px-3 py-1.5 border border-slate-200 rounded-lg text-sm"/>
@@ -2336,7 +2587,7 @@ const splitAvg = (days, test, metric = "mood") => {
 };
 
 // One record per calendar day joining mood, tasks, habits and workouts
-const buildDays = (from, to, { moodByDate, dailyTasks, workoutsByDate, habits }) => {
+const buildDays = (from, to, { moodByDate, dailyTasks, workoutsByDate, habits, goalSteps = {} }) => {
   const days = [];
   for (let iso = from; iso <= to; iso = addDaysISO(iso, 1)) {
     const tasks = tasksOn(dailyTasks, iso);
@@ -2348,6 +2599,7 @@ const buildDays = (from, to, { moodByDate, dailyTasks, workoutsByDate, habits })
       habitsDone: habitsDoneOn(dailyTasks, iso),
       activeHabits: habits.filter(h => h.created <= iso),
       workouts: workoutsByDate[iso] || 0,
+      goalSteps: goalSteps[iso] || 0,
     });
   }
   return days;
@@ -2380,6 +2632,9 @@ const buildFindings = (days, habits, tagRows) => {
 
   const workout = splitAvg(days, d => d.workouts > 0);
   if (workout) add("workout", workout.delta, <>Mood averages {b(workout.yes)} on workout days and {b(workout.no)} on rest days.</>);
+
+  const goalDays = splitAvg(days, d => d.goalSteps > 0);
+  if (goalDays) add("goals", goalDays.delta, <>On days you move a goal forward, mood averages {b(goalDays.yes)}, vs {b(goalDays.no)} on other days.</>);
 
   const sleep = splitAvg(days, d => d.mood.sleep >= 6 ? true : d.mood.sleep <= 4 ? false : null);
   if (sleep) add("sleep", sleep.delta, <>When you rate sleep 6 or higher, mood averages {b(sleep.yes)}, vs {b(sleep.no)} when it's 4 or lower.</>);
@@ -2551,7 +2806,14 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
   const workoutsByDate = {};
   workouts.forEach(w => { const d = parseWorkoutDate(w.date); if (isValidDate(d)) { const iso = toISO(d); workoutsByDate[iso] = (workoutsByDate[iso] || 0) + 1; } });
   const habitList = habits.map(h => ({ ...h, created: h.created_at ? toISO(new Date(h.created_at)) : today }));
-  const sources = { moodByDate, dailyTasks, workoutsByDate, habits: habitList };
+  // Steps toward a goal by the day they were finished: milestones plus Kanban cards linked to a goal
+  const goalStepDates = goals.map(g => ({ id: g.id, dates: [
+    ...(g.milestones || []).filter(m => m.done && m.done_at).map(m => stampISO(m.done_at)),
+    ...kanbanCards.filter(c => c.goal_id === g.id && c.status === "done" && c.completed_at).map(c => stampISO(c.completed_at)),
+  ] }));
+  const goalSteps = {};
+  goalStepDates.forEach(g => g.dates.forEach(d => { goalSteps[d] = (goalSteps[d] || 0) + 1; }));
+  const sources = { moodByDate, dailyTasks, workoutsByDate, habits: habitList, goalSteps };
 
   // "All time" starts at the earliest thing logged, capped at three years
   const earliest = [
@@ -2774,12 +3036,19 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
           <div className="space-y-3">
             {goals.map(g => {
               const hex = GOAL_COLORS.find(c => c.id === g.color)?.hex || "#666";
-              const prog = goalProgress(g);
+              const prog = goalProgress(g, kanbanCards);
+              const recent = goalStepDates.find(x => x.id === g.id).dates.filter(d => d >= from).length;
+              const open = prog.cards.filter(c => c.status !== "done");
+              const overdue = open.filter(c => c.due_date && c.due_date < today).length;
               return (
                 <div key={g.id}>
-                  <div className="flex items-center justify-between text-sm mb-1">
-                    <span className="flex items-center gap-2 font-medium text-slate-700"><span className="w-2.5 h-2.5 rounded-full" style={{background:hex}}/>{g.title}</span>
-                    <span className="text-xs text-slate-500">{prog.done}/{prog.total} milestones</span>
+                  <div className="flex items-center justify-between gap-2 text-sm mb-1">
+                    <span className="flex items-center gap-2 font-medium text-slate-700 min-w-0"><span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{background:hex}}/><span className="truncate">{g.title}</span></span>
+                    <span className="flex items-center gap-2 text-xs text-slate-500 flex-shrink-0">
+                      {recent > 0 && <span className="font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700" title="Milestones and cards finished in this range">+{recent} {range === "all" ? "dated" : `in ${span}d`}</span>}
+                      {overdue > 0 && <span className="font-semibold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700">{overdue} overdue</span>}
+                      {prog.done}/{prog.total} steps
+                    </span>
                   </div>
                   <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{width:`${prog.pct}%`,background:hex}}/></div>
                 </div>
