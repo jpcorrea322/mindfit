@@ -576,7 +576,7 @@ function WorkoutsTab({ session, isMobile }) {
       await supabase.from("workouts").update({ date: workout.date, type: workout.type, exercises: workout.exercises }).eq("id", workout.id).eq("user_id", uid);
       setWorkouts(prev => prev.map(w => w.id === workout.id ? workout : w));
     } else {
-      const { data } = await supabase.from("workouts").insert({ user_id: uid, date: workout.date, type: workout.type, exercises: workout.exercises }).select().single();
+      const { data } = await supabase.from("workouts").insert({ user_id: uid, date: workout.date, type: workout.type, exercises: workout.exercises, program_week: workout.program_week ?? null }).select().single();
       if (data) setWorkouts(prev => [data, ...prev]);
     }
   };
@@ -907,7 +907,12 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
   const weekStart = addDaysISO(settings.startDate, weekIdx * 7);
   const weekEnd = addDaysISO(weekStart, 6);
 
-  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= weekStart && w.date <= weekEnd);
+  // A session belongs to the program week it was logged for (program_week), so a late
+  // leg day done on next Monday stays in its own week. Untagged sessions (logged from
+  // the main form) fall back to the calendar window of the week they were done in.
+  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= settings.startDate && (
+    w.program_week != null ? w.program_week === weekIdx + 1 : w.date >= weekStart && w.date <= weekEnd
+  ));
   const lastWeightFor = (name) => {
     const w = workouts.find(w => w.exercises.some(e => normEx(e.name) === normEx(name) && maxWeight(e.weight) > 0));
     return w ? maxWeight(w.exercises.find(e => normEx(e.name) === normEx(name)).weight) : "";
@@ -918,6 +923,7 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
     onLogSession({
       date: today >= weekStart && today <= weekEnd ? today : addDaysISO(weekStart, day.dayOffset),
       type: day.name,
+      program_week: weekIdx + 1,
       exercises: [
         ...tier([day.core], phase.core, () => pplCoreLoad(settings.rms, day, weekIdx)).map(e => ({ ...e, notes: `W${weekIdx+1} ${phase.label} · ${phase.rpe}` })),
         ...tier(day.secondary, phase.sec, l => lastWeightFor(l.name)),
