@@ -576,7 +576,7 @@ function WorkoutsTab({ session, isMobile }) {
       await supabase.from("workouts").update({ date: workout.date, type: workout.type, exercises: workout.exercises }).eq("id", workout.id).eq("user_id", uid);
       setWorkouts(prev => prev.map(w => w.id === workout.id ? workout : w));
     } else {
-      const { data } = await supabase.from("workouts").insert({ user_id: uid, date: workout.date, type: workout.type, exercises: workout.exercises }).select().single();
+      const { data } = await supabase.from("workouts").insert({ user_id: uid, date: workout.date, type: workout.type, exercises: workout.exercises, program_week: workout.program_week ?? null }).select().single();
       if (data) setWorkouts(prev => [data, ...prev]);
     }
   };
@@ -584,6 +584,15 @@ function WorkoutsTab({ session, isMobile }) {
   const deleteWorkout = async (id) => {
     await supabase.from("workouts").delete().eq("id", id).eq("user_id", uid);
     setWorkouts(prev => prev.filter(w => w.id !== id));
+  };
+
+  // Unlogging from the Program tab deletes a session the Program created (it has a
+  // program_week). A workout logged from the main form that only matched by date is
+  // detached instead (program_week 0 = "not a program session"), so it stays in History.
+  const unlogProgramSession = async (w) => {
+    if (w.program_week > 0) return deleteWorkout(w.id);
+    await supabase.from("workouts").update({ program_week: 0 }).eq("id", w.id).eq("user_id", uid);
+    setWorkouts(prev => prev.map(x => x.id === w.id ? { ...x, program_week: 0 } : x));
   };
 
   const sorted = [...workouts].sort((a,b) => (parseWorkoutDate(b.date) || 0) - (parseWorkoutDate(a.date) || 0));
@@ -633,7 +642,7 @@ function WorkoutsTab({ session, isMobile }) {
       <Segmented value={view} onChange={setView}
         options={[{id:"history",label:"History",icon:History},{id:"progress",label:"Progress",icon:TrendingUp},{id:"program",label:"Program",icon:Calendar}]}/>
 
-      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout} onUnlog={deleteWorkout}/>}
+      {view === "program" && <PPLProgram session={session} workouts={sorted} onLogSession={setFormWorkout} onUnlog={unlogProgramSession}/>}
 
       {view === "history" && (
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
@@ -860,7 +869,8 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
   const [draft, setDraft]       = useState(saved || { startDate: mondayOf(new Date()), rms: PPL_DEFAULT_RMS });
   const [weekOffset, setWeekOffset] = useState(0);
   const [openDay, setOpenDay]   = useState(null);
-  const [confirmUnlog, setConfirmUnlog] = useState(null); // day id awaiting "remove this logged session?"
+  const [confirmUnlog, setConfirmUnlog] = useState(null); // `${weekIdx}-${day.id}` awaiting "remove this logged session?"
+  const [unlogging, setUnlogging] = useState(false);
   const [guide, setGuide]       = useState(null);
   const [saving, setSaving]     = useState(false);
 
@@ -907,7 +917,12 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
   const weekStart = addDaysISO(settings.startDate, weekIdx * 7);
   const weekEnd = addDaysISO(weekStart, 6);
 
-  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= weekStart && w.date <= weekEnd);
+  // A session belongs to the program week it was logged for (program_week), so a late
+  // leg day done on next Monday stays in its own week. Untagged sessions (logged from
+  // the main form) fall back to the calendar window of the week they were done in.
+  const loggedFor = (day) => workouts.find(w => w.type === day.name && w.date >= settings.startDate && (
+    w.program_week != null ? w.program_week === weekIdx + 1 : w.date >= weekStart && w.date <= weekEnd
+  ));
   const lastWeightFor = (name) => {
     const w = workouts.find(w => w.exercises.some(e => normEx(e.name) === normEx(name) && maxWeight(e.weight) > 0));
     return w ? maxWeight(w.exercises.find(e => normEx(e.name) === normEx(name)).weight) : "";
@@ -918,6 +933,7 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
     onLogSession({
       date: today >= weekStart && today <= weekEnd ? today : addDaysISO(weekStart, day.dayOffset),
       type: day.name,
+      program_week: weekIdx + 1,
       exercises: [
         ...tier([day.core], phase.core, () => pplCoreLoad(settings.rms, day, weekIdx)).map(e => ({ ...e, notes: `W${weekIdx+1} ${phase.label} · ${phase.rpe}` })),
         ...tier(day.secondary, phase.sec, l => lastWeightFor(l.name)),
@@ -976,17 +992,17 @@ function PPLProgram({ session, workouts, onLogSession, onUnlog }) {
                   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${workoutTypeStyle(day.name)}`}>{day.name}</span>
                   <span className="text-xs text-slate-400">{day.weekday} · {isoToLabel(addDaysISO(weekStart, day.dayOffset))}</span>
                 </div>
-                {logged && confirmUnlog === day.id ? (
+                {logged && confirmUnlog === `${weekIdx}-${day.id}` ? (
                   <div className="flex items-center gap-2 text-xs">
                     <span className="text-slate-500">Remove?</span>
-                    <button onClick={async () => { await onUnlog(logged.id); setConfirmUnlog(null); }} className="px-2.5 py-1.5 bg-red-600 text-white rounded-lg font-semibold">Remove</button>
+                    <button disabled={unlogging} onClick={async () => { setUnlogging(true); try { await onUnlog(logged); } finally { setUnlogging(false); setConfirmUnlog(null); } }} className="px-2.5 py-1.5 bg-red-600 text-white rounded-lg font-semibold disabled:opacity-50">Remove</button>
                     <button onClick={() => setConfirmUnlog(null)} className="px-2.5 py-1.5 bg-slate-100 text-slate-600 rounded-lg font-semibold">Keep</button>
                   </div>
                 ) : logged ? (
                   <div className="flex items-center gap-1">
                     <button onClick={() => onLogSession(logged)} title="View or edit the logged session"
                       className="flex items-center gap-1 text-xs font-semibold text-emerald-600 px-2 py-1.5 rounded-lg hover:bg-emerald-50"><Check size={13}/> Logged</button>
-                    <button onClick={() => setConfirmUnlog(day.id)} title="Unlog this session"
+                    <button onClick={() => setConfirmUnlog(`${weekIdx}-${day.id}`)} title="Unlog this session"
                       className="text-xs px-2 py-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-slate-50 font-semibold flex items-center gap-1"><X size={13}/> Unlog</button>
                   </div>
                 ) : <button onClick={() => logSession(day)} className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold flex items-center gap-1"><Plus size={13}/> Log session</button>}
@@ -1097,6 +1113,7 @@ function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
   const [formType, setFormType]     = useState(workout?.type || "Push");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [errors, setErrors]         = useState([]);
+  const [saving, setSaving]         = useState(false);
 
   const updateEx = (idx, patch) => setExercises(prev => prev.map((ex, i) => i === idx ? { ...ex, ...patch } : ex));
   const weightsOf = (ex) => String(ex.weight ?? "").split(",");
@@ -1107,7 +1124,10 @@ function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
     const valid = exercises.filter(ex => ex.name && ex.sets && ex.reps);
     if (valid.length === 0) errs.push("Add at least one exercise with name, sets, and reps");
     if (errs.length) { setErrors(errs); return; }
-    await onSave({ ...(workout||{}), date: formDate, type: formType, exercises: valid });
+    if (saving) return; // a double tap used to insert the session twice
+    setSaving(true);
+    try { await onSave({ ...(workout||{}), date: formDate, type: formType, exercises: valid }); }
+    finally { setSaving(false); }
   };
 
   const typeOptions = WORKOUT_TYPES.includes(formType) ? WORKOUT_TYPES : [...WORKOUT_TYPES, formType];
@@ -1155,7 +1175,7 @@ function WorkoutForm({ workout, isMobile, onSave, onDelete, onClose }) {
           </div>
         ))}
         <button onClick={() => setExercises([...exercises, {name:"",sets:"",reps:"",weight:"",notes:""}])} className="w-full py-2.5 border-2 border-dashed border-slate-200 rounded-lg text-slate-500 hover:border-slate-400 text-sm">+ Add Exercise</button>
-        <button onClick={save} className="w-full py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm">{isEditing ? "Update Workout" : "Save Workout"}</button>
+        <button onClick={save} disabled={saving} className="w-full py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-semibold text-sm disabled:opacity-50">{isEditing ? "Update Workout" : "Save Workout"}</button>
         {isEditing && !confirmDelete && <button onClick={() => setConfirmDelete(true)} className="w-full py-2.5 bg-rose-50 text-rose-600 rounded-lg hover:bg-rose-100 text-sm font-semibold flex items-center justify-center gap-1"><Trash2 size={14}/> Delete Workout</button>}
         {isEditing && confirmDelete && (
           <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
