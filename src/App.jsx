@@ -1,36 +1,32 @@
 import { useState, useEffect, useRef } from "react";
-import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History, GripVertical } from "lucide-react";
+import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History, GripVertical, CalendarPlus, LayoutList, ArrowUp, ArrowDown, Bot, Copy, Inbox } from "lucide-react";
 import { supabase } from "./supabase.js";
 
 //  Constants 
 const SEED_TAGS = ["work","sleep","family","stress","exercise","diet","social","health","rest","travel","focus","anxiety","tired","motivated","productive","grateful","overwhelmed","calm","lonely","connected","sick","energy","outdoors","creative","frustrated"];
 
 // Mood scale keeps its original colors (green high, red low) regardless of the app theme.
-// Solid swatches are the original shades; text/light/border are those hues tuned to read on navy.
 const MOOD_SPECTRUM = [
-  { min: 8, bg: "bg-emerald-600", text: "text-emerald-400", light: "bg-emerald-100", border: "border-emerald-300", hex: "#059669", fg: "text-white" },
-  { min: 6, bg: "bg-emerald-400", text: "text-emerald-300", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399", fg: "text-white" },
-  { min: 4, bg: "bg-yellow-400",  text: "text-yellow-400",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15", fg: "text-white" },
-  { min: 2, bg: "bg-orange-400",  text: "text-orange-400",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c", fg: "text-white" },
-  { min: 0, bg: "bg-rose-600",    text: "text-rose-400",    light: "bg-rose-100",    border: "border-rose-300",    hex: "#e11d48", fg: "text-white" },
+  { min: 8, bg: "bg-emerald-600", text: "text-emerald-700", light: "bg-emerald-100", border: "border-emerald-300", hex: "#059669", fg: "text-white" },
+  { min: 6, bg: "bg-emerald-400", text: "text-emerald-600", light: "bg-emerald-50",  border: "border-emerald-200", hex: "#34d399", fg: "text-white" },
+  { min: 4, bg: "bg-yellow-400",  text: "text-yellow-700",  light: "bg-yellow-100",  border: "border-yellow-300",  hex: "#facc15", fg: "text-white" },
+  { min: 2, bg: "bg-orange-400",  text: "text-orange-600",  light: "bg-orange-100",  border: "border-orange-300",  hex: "#fb923c", fg: "text-white" },
+  { min: 0, bg: "bg-rose-600",    text: "text-rose-700",    light: "bg-rose-100",    border: "border-rose-300",    hex: "#e11d48", fg: "text-white" },
 ];
 const MOOD_COLORS = (score) => MOOD_SPECTRUM.find(c => score >= c.min) || MOOD_SPECTRUM[MOOD_SPECTRUM.length - 1];
 
 const GOAL_COLORS = [
   { id: "rose",    hex: "#f43f5e", label: "Red"     },
   { id: "amber",   hex: "#fb923c", label: "Orange"  },
-  { id: "yellow",  hex: "#facc15", label: "Yellow"  },
-  { id: "emerald", hex: "#4ade80", label: "Green"   },
-  { id: "cyan",    hex: "#22d3ee", label: "Cyan"    },
+  { id: "yellow",  hex: "#eab308", label: "Yellow"  },
+  { id: "emerald", hex: "#22c55e", label: "Green"   },
+  { id: "cyan",    hex: "#06b6d4", label: "Cyan"    },
   { id: "blue",    hex: "#3b82f6", label: "Blue"    },
   { id: "violet",  hex: "#a855f7", label: "Violet"  },
   { id: "fuchsia", hex: "#ec4899", label: "Pink"    },
-  { id: "slate",   hex: "#7c8bb3", label: "Slate"   },
+  { id: "slate",   hex: "#64748b", label: "Slate"   },
 ];
 
-const KANBAN_STATUSES = ["todo", "inprogress", "done"];
-const KANBAN_LABELS   = { todo: "To Do", inprogress: "In Progress", done: "Done" };
-const KANBAN_COLORS   = { todo: "bg-gray-100 text-gray-700", inprogress: "bg-blue-100 text-blue-700", done: "bg-emerald-100 text-emerald-700" };
 
 // Local-time ISO date (YYYY-MM-DD) so dates don't switch before midnight
 const toISO = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -56,10 +52,81 @@ const habitStreak  = (dailyTasks, habitId, fromISO) => {
 
 const isoToLabel = (iso) => { if (!iso) return ""; const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
-// A daily task can be planned from a Kanban card or a goal milestone. It then carries
+// Areas hold the things to stay on top of. Each item (a row of tasks_kanban, kept under its old name)
+// belongs to an area and has a cadence:
+// - once:   a one-off. due_date is its deadline; with start_date it covers a period (start_date to due_date).
+// - weekly: resets every Monday; it's done for the week once checked off per_week times.
+// - every:  comes due again repeat_days after it's done (due_date moves forward).
+// Weekly and every items with an end_date are temporary: they stop recurring after it. Without one they're permanent.
+// Recurring completions are kept in done_log as [{ date, prev_due }], newest last.
+const REPEAT_OPTIONS = [[2, "Every 2 days"], [3, "Every 3 days"], [14, "Every 2 weeks"], [30, "Every month"], [90, "Every 3 months"], [180, "Every 6 months"], [365, "Every year"]];
+const cadenceOf = (c) => c.cadence === "weekly" ? "weekly" : (c.cadence === "every" || c.repeat_days) ? "every" : "once";
+const weekStartISO = (iso = todayISO()) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return toISO(d); };
+const repeatLabel = (c) => {
+  const cad = cadenceOf(c);
+  if (cad === "weekly") return (c.per_week || 1) > 1 ? `${c.per_week}× a week` : "Weekly";
+  if (cad === "every") return REPEAT_OPTIONS.find(o => o[0] === c.repeat_days)?.[1] || `Every ${c.repeat_days} days`;
+  return null;
+};
+const lastDoneOf = (c) => { const log = c.done_log || []; return log.length ? log[log.length - 1] : null; };
+const isPermanent = (c) => cadenceOf(c) === "weekly" && !c.end_date && !c.start_date;
+
+// Where an item stands today.
+// done: nothing left to do right now (for weekly: this week's target met; for a temporary recurring item: its period is over)
+// due: the date it's next due (null when there's nothing due), upcoming: its period hasn't started, ended: its period is over
+// doneToday: checked off today (what a task planned from it on today's list mirrors)
+const itemState = (c) => {
+  const today = todayISO();
+  const log = c.done_log || [];
+  const cad = cadenceOf(c);
+  const upcoming = !!c.start_date && c.start_date > today;
+  const doneToday = cad === "once" ? c.status === "done" && stampISO(c.completed_at) === today : log.some(e => e.date === today);
+  if (cad === "weekly") {
+    const ws = weekStartISO(today), we = addDaysISO(ws, 6);
+    const ended = !!c.end_date && c.end_date < today;
+    const count = log.filter(e => e.date >= ws && e.date <= we).length;
+    const target = c.per_week || 1;
+    return { cad, count, target, upcoming, ended, doneToday, done: ended || (!upcoming && count >= target), due: upcoming || ended ? null : (c.end_date && c.end_date < we ? c.end_date : we) };
+  }
+  if (cad === "every") {
+    const last = lastDoneOf(c);
+    if (last && last.date === today) return { cad, upcoming, ended: false, doneToday, done: true, due: last.prev_due };
+    const ended = !!c.end_date && (c.end_date < today || (c.due_date && c.due_date > c.end_date));
+    return { cad, upcoming, ended, doneToday, done: ended, due: ended ? null : c.due_date || c.start_date || null };
+  }
+  return { cad, upcoming, ended: false, doneToday, done: c.status === "done", due: c.due_date };
+};
+// Whether a task planned from this item counts it as done: recurring items are checked off one day at a time
+const sourceDone = (c) => itemState(c).cad === "once" ? itemState(c).done : itemState(c).doneToday;
+
+// Fields that check an item off (done) or take back today's check-off; null when there's nothing to change
+const itemDoneFields = (c, done) => {
+  const iso = todayISO();
+  const cad = cadenceOf(c);
+  const log = c.done_log || [];
+  if (cad === "once") return { status: done ? "done" : "todo", completed_at: done ? new Date().toISOString() : null };
+  if (done) {
+    const entry = { date: iso, prev_due: c.due_date || null };
+    return cad === "weekly"
+      ? { done_log: [...log, entry], completed_at: new Date().toISOString() }
+      : { done_log: [...log, entry], due_date: addDaysISO(iso, c.repeat_days), completed_at: new Date().toISOString() };
+  }
+  // Undo the latest check-off from today (or, for weekly, from this week)
+  const from = cad === "weekly" ? weekStartISO(iso) : iso;
+  let i = log.length - 1;
+  while (i >= 0 && log[i].date < from) i--;
+  if (i < 0 || log[i].date < from) return null;
+  const rest = [...log.slice(0, i), ...log.slice(i + 1)];
+  const fields = { done_log: rest, completed_at: rest.length ? new Date(rest[rest.length - 1].date + "T12:00:00").toISOString() : null };
+  if (cad === "every") fields.due_date = log[i].prev_due;
+  return fields;
+};
+const daysUntil = (iso) => Math.round((new Date(iso + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 86400000);
+
+// A daily task can be planned from an area item or a goal milestone. It then carries
 // source = { type: "kanban", cardId } or { type: "milestone", goalId, milestoneId }.
-// The card or milestone stays the record of its title and completion; the daily task is that day's plan to work on it.
-const goalHex = (g) => GOAL_COLORS.find(c => c.id === g?.color)?.hex || "#666";
+// The item or milestone stays the record of its title and completion; the daily task is that day's plan to work on it.
+const goalHex = (g) => GOAL_COLORS.find(c => c.id === g?.color)?.hex || "#64748b";
 const stampISO = (ts) => ts ? toISO(new Date(ts)) : null;
 const sameSource = (a, b) => !!a && !!b && a.type === b.type
   && (a.type === "kanban" ? a.cardId === b.cardId : a.goalId === b.goalId && a.milestoneId === b.milestoneId);
@@ -68,7 +135,7 @@ const resolveSource = (source, kanbanCards, goals) => {
   if (!source) return null;
   if (source.type === "kanban") {
     const card = kanbanCards.find(c => c.id === source.cardId);
-    return card ? { kind: "kanban", title: card.title, done: card.status === "done", goal: goals.find(g => g.id === card.goal_id) || null } : null;
+    return card ? { kind: "kanban", title: card.title, done: sourceDone(card), goal: goals.find(g => g.id === card.goal_id) || null, area: card.area || null } : null;
   }
   const goal = goals.find(g => g.id === source.goalId);
   const m = (goal?.milestones || []).find(x => x.id === source.milestoneId);
@@ -76,12 +143,14 @@ const resolveSource = (source, kanbanCards, goals) => {
 };
 const isPlannedOn = (dailyTasks, iso, source) => tasksOn(dailyTasks, iso).some(t => sameSource(t.source, source));
 
-function GoalChip({ goal, label }) {
-  if (!goal && !label) return null;
+// Tags a task with the goal or area it came from
+function GoalChip({ goal, area, label }) {
+  const tag = goal || area;
+  if (!tag && !label) return null;
   return (
-    <span className="inline-flex items-center gap-1 max-w-[11rem] text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 align-middle">
-      {goal && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: goalHex(goal) }}/>}
-      <span className="truncate">{label || goal.title}</span>
+    <span className="inline-flex items-center gap-1 max-w-[11rem] text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 align-middle">
+      {tag && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: goalHex(tag) }}/>}
+      <span className="truncate">{label || tag.title || tag.name}</span>
     </span>
   );
 }
@@ -111,10 +180,9 @@ function AuthScreen() {
   return (
     <div className="min-h-screen bg-app flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-8 w-full max-w-sm relative overflow-hidden">
-        <div className="absolute inset-x-0 top-0 h-1 bg-rainbow"/>
         <div className="flex items-center gap-2 mb-6 justify-center">
-          <Dumbbell className="text-cyan-400" size={28} />
-          <span className="font-bold text-2xl text-rainbow">MindFit</span>
+          <Dumbbell className="text-blue-600" size={28} />
+          <span className="font-bold text-2xl text-slate-900">MindFit</span>
         </div>
         <div className="flex gap-1 bg-slate-100 p-1 rounded-xl mb-6">
           {["login","signup"].map(m => (
@@ -162,6 +230,8 @@ export default function App() {
   const [kanbanCards, setKanbanCards] = useState([]);
   const [goals, setGoals] = useState([]);
   const [habits, setHabits] = useState([]);
+  const [areas, setAreas] = useState([]);
+  const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -184,8 +254,16 @@ export default function App() {
     if (!session) return;
     loadDailyTasks();
     loadKanban();
+    loadAreas();
     loadGoals();
     loadHabits();
+    // An agent may have changed things while the app sat in the background; pick that up on return
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      loadDailyTasks(); loadKanban(); loadAreas(); loadGoals();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [session]);
 
   const uid = () => session?.user?.id;
@@ -241,10 +319,6 @@ export default function App() {
     if (data) setKanbanCards(data);
   };
 
-  const saveKanban = async (next) => {
-    setKanbanCards(next);
-  };
-
   const addKanbanCard = async (card) => {
     const { data } = await supabase.from("tasks_kanban").insert({ ...card, user_id: uid() }).select().single();
     if (data) setKanbanCards(prev => [...prev, data]);
@@ -260,14 +334,54 @@ export default function App() {
     setKanbanCards(prev => prev.filter(c => c.id !== id));
   };
 
+  //  Areas 
+  // A new account starts with a standard set of areas; they can be renamed, recolored, reordered or removed.
+  const seedingAreas = useRef(false);
+  const loadAreas = async () => {
+    const { data, error } = await supabase.from("life_areas").select("*").eq("user_id", uid()).order("position").order("created_at");
+    if (error || !data) return;
+    if (data.length > 0) { setAreas(data); return; }
+    if (seedingAreas.current) return;
+    seedingAreas.current = true;
+    const { data: seeded } = await supabase.from("life_areas")
+      .insert(DEFAULT_AREAS.map((a, i) => ({ ...a, position: i, user_id: uid() }))).select();
+    if (seeded) setAreas(seeded.sort((a, b) => a.position - b.position));
+  };
+
+  const addArea = async (fields) => {
+    const position = Math.max(-1, ...areas.map(a => a.position)) + 1;
+    const { data } = await supabase.from("life_areas").insert({ ...fields, position, user_id: uid() }).select().single();
+    if (data) setAreas(prev => [...prev, data]);
+  };
+
+  const updateArea = async (id, updates) => {
+    setAreas(prev => prev.map(a => a.id === id ? { ...a, ...updates } : a).sort((a, b) => a.position - b.position));
+    await supabase.from("life_areas").update(updates).eq("id", id).eq("user_id", uid());
+  };
+
+  // Swaps an area with its neighbour; positions are renumbered so ties can't stick
+  const moveArea = async (id, delta) => {
+    const order = [...areas];
+    const i = order.findIndex(a => a.id === id), j = i + delta;
+    if (i < 0 || j < 0 || j >= order.length) return;
+    [order[i], order[j]] = [order[j], order[i]];
+    const next = order.map((a, k) => ({ ...a, position: k }));
+    setAreas(next);
+    await Promise.all(next.filter((a, k) => areas.find(x => x.id === a.id)?.position !== k)
+      .map(a => supabase.from("life_areas").update({ position: a.position }).eq("id", a.id).eq("user_id", uid())));
+  };
+
+  // Its items are kept and become unsorted
+  const deleteArea = async (id) => {
+    await supabase.from("life_areas").delete().eq("id", id).eq("user_id", uid());
+    setAreas(prev => prev.filter(a => a.id !== id));
+    setKanbanCards(prev => prev.map(c => c.area_id === id ? { ...c, area_id: null } : c));
+  };
+
   //  Goals 
   const loadGoals = async () => {
     const { data } = await supabase.from("tasks_goals").select("*").eq("user_id", uid()).order("created_at");
     if (data) setGoals(data);
-  };
-
-  const saveGoals = async (next) => {
-    setGoals(next);
   };
 
   const addGoal = async (goal) => {
@@ -281,14 +395,14 @@ export default function App() {
   };
 
   const deleteGoal = async (id) => {
-    // Older Kanban cards may still reference the goal through a foreign key
+    // Older area items may still reference the goal through a foreign key
     await supabase.from("tasks_kanban").update({ goal_id: null }).eq("goal_id", id).eq("user_id", uid());
     setKanbanCards(prev => prev.map(c => c.goal_id === id ? { ...c, goal_id: null } : c));
     await supabase.from("tasks_goals").delete().eq("id", id).eq("user_id", uid());
     setGoals(prev => prev.filter(g => g.id !== id));
   };
 
-  //  Links between Daily, Kanban and Goals 
+  //  Links between Daily, Areas and Goals 
   // Completes or reopens a card/milestone and keeps the daily list in step with it.
   // `at` is the daily task being checked ({ date, taskId, status }); today's other tasks planned from the same source follow along.
   const setSourceDone = async (source, done, at) => {
@@ -305,8 +419,8 @@ export default function App() {
 
     if (source.type === "kanban") {
       const card = kanbanCards.find(c => c.id === source.cardId);
-      if (card && (card.status === "done") !== done)
-        await updateKanbanCard(card.id, { status: done ? "done" : "inprogress", completed_at: done ? new Date().toISOString() : null });
+      const fields = card && sourceDone(card) !== done ? itemDoneFields(card, done) : null;
+      if (fields) await updateKanbanCard(card.id, fields);
     } else {
       const goal = goals.find(g => g.id === source.goalId);
       const m = (goal?.milestones || []).find(x => x.id === source.milestoneId);
@@ -314,10 +428,6 @@ export default function App() {
         await updateGoal(goal.id, { milestones: goal.milestones.map(x => x.id === m.id ? { ...x, done, done_at: done ? new Date().toISOString() : null } : x) });
     }
   };
-
-  const moveKanbanCard = (card, status) => (status === "done") !== (card.status === "done")
-    ? setSourceDone({ type: "kanban", cardId: card.id }, status === "done")
-    : updateKanbanCard(card.id, { status });
 
   const renameSource = (source, text) => {
     if (source.type === "kanban") return updateKanbanCard(source.cardId, { title: text });
@@ -332,7 +442,10 @@ export default function App() {
     saveDailyTasks({ ...dailyTasks, [date]: { tasks: [...items.filter(t => !t.habitId), { id: Date.now(), text, status: "pending", source }, ...items.filter(t => t.habitId)] } });
   };
 
-  const links = { setSourceDone, moveKanbanCard, renameSource, planSource };
+  const links = { setSourceDone, renameSource, planSource };
+
+  // Items carry their area so every view can label them with it
+  const items = kanbanCards.map(c => ({ ...c, area: areas.find(a => a.id === c.area_id) || null }));
 
   //  Habits 
   const loadHabits = async () => {
@@ -366,25 +479,30 @@ export default function App() {
   if (!session) return <AuthScreen />;
 
   const TABS = [
-    { id: "tasks",    label: "Tasks",    icon: Target,    accent: "text-cyan-400",   bar: "border-cyan-400"   },
-    { id: "workouts", label: "Workouts", icon: Dumbbell,  accent: "text-orange-400", bar: "border-orange-400" },
-    { id: "mood",     label: "Mood",     icon: Heart,     accent: "text-pink-400",   bar: "border-pink-400"   },
-    { id: "insights", label: "Insights", icon: BarChart3, accent: "text-violet-400", bar: "border-violet-400" },
+    { id: "tasks",    label: "Tasks",    icon: Target,    accent: "text-blue-600",   bar: "border-blue-600"   },
+    { id: "workouts", label: "Workouts", icon: Dumbbell,  accent: "text-orange-600", bar: "border-orange-600" },
+    { id: "mood",     label: "Mood",     icon: Heart,     accent: "text-rose-600",   bar: "border-rose-600"   },
+    { id: "insights", label: "Insights", icon: BarChart3, accent: "text-violet-600", bar: "border-violet-600" },
   ];
 
   return (
     <div className="min-h-screen bg-app">
-      <header className="bg-navy-950/85 backdrop-blur border-b border-slate-100 sticky top-0 z-40 pt-safe">
+      <header className="bg-white/85 backdrop-blur border-b border-slate-200 sticky top-0 z-40 pt-safe">
         <div className={`max-w-4xl mx-auto px-4 ${isMobile ? "py-2.5" : "py-3"} flex items-center justify-between`}>
           <div className="flex items-center gap-2">
             <Dumbbell className={TABS.find(t => t.id === tab)?.accent} size={isMobile ? 22 : 28} />
             {isMobile
               ? <span className="font-bold text-lg text-slate-900">{TABS.find(t => t.id === tab)?.label}</span>
-              : <span className="font-bold text-xl text-rainbow">MindFit</span>}
+              : <span className="font-bold text-xl text-slate-900">MindFit</span>}
           </div>
+          <div className="flex items-center gap-1">
+          <button onClick={() => setShowSettings(true)} className={`flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 rounded-lg hover:bg-slate-100 transition-colors ${isMobile ? "p-2.5" : "px-2 py-1.5"}`} aria-label="Connect an AI agent">
+            <Bot size={isMobile ? 18 : 14} />{!isMobile && " Connect agent"}
+          </button>
           <button onClick={signOut} className={`flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 transition-colors ${isMobile ? "p-2.5" : "px-2 py-1.5"}`} aria-label="Sign out">
             <LogOut size={isMobile ? 18 : 14} />{!isMobile && " Sign out"}
           </button>
+          </div>
         </div>
         {!isMobile && (
           <div className="max-w-4xl mx-auto px-4">
@@ -398,11 +516,10 @@ export default function App() {
             </div>
           </div>
         )}
-        <div className="h-0.5 bg-rainbow opacity-80"/>
       </header>
+      {showSettings && <AgentSheet session={session} onClose={() => setShowSettings(false)}/>}
       {isMobile && (
-        <nav className="fixed bottom-0 inset-x-0 z-40 bg-navy-950/90 backdrop-blur border-t border-slate-100 pb-safe">
-          <div className="h-0.5 bg-rainbow opacity-60"/>
+        <nav className="fixed bottom-0 inset-x-0 z-40 bg-white/90 backdrop-blur border-t border-slate-200 pb-safe">
           <div className="flex">
             {TABS.map(({ id, label, icon: Icon, accent }) => (
               <button key={id} onClick={() => changeTab(id)}
@@ -419,8 +536,9 @@ export default function App() {
           <TasksTab
             isMobile={isMobile}
             dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks}
-            kanbanCards={kanbanCards}
+            kanbanCards={items}
             addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}
+            areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
             goals={goals}
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
             habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
@@ -428,8 +546,8 @@ export default function App() {
           />
         )}
         {tab === "workouts" && <WorkoutsTab session={session} isMobile={isMobile} />}
-        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} kanbanCards={kanbanCards} goals={goals} />}
-        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={kanbanCards} goals={goals} habits={habits}/>}
+        {tab === "mood"     && <MoodTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} habits={habits} kanbanCards={items} goals={goals} />}
+        {tab === "insights" && <InsightsTab session={session} isMobile={isMobile} dailyTasks={dailyTasks} kanbanCards={items} goals={goals} habits={habits}/>}
       </main>
     </div>
   );
@@ -1498,7 +1616,7 @@ function DayDetail({ entry, onEdit, onClose, habits, dailyTasks, kanbanCards, go
 }
 
 const TASK_STATUS_STYLES = {
-  complete: { icon: Check, dot: "bg-emerald-500 text-navy-950", text: "text-slate-700" },
+  complete: { icon: Check, dot: "bg-emerald-500 text-white", text: "text-slate-700" },
   skipped:  { icon: X,     dot: "bg-slate-200 text-slate-500",  text: "text-slate-400 line-through" },
   pending:  { icon: null,  dot: "border-2 border-amber-400",    text: "text-slate-700" },
 };
@@ -1511,8 +1629,8 @@ function DayTasks({ iso, dailyTasks, habits, kanbanCards = [], goals = [] }) {
   // Cards and milestones finished this day that aren't already on its task list
   const listed = (source) => dayTasks.some(t => sameSource(t.source, source));
   const alsoDone = [
-    ...kanbanCards.filter(c => c.status === "done" && stampISO(c.completed_at) === iso && !listed({ type: "kanban", cardId: c.id }))
-      .map(c => ({ key: `c-${c.id}`, text: c.title, goal: goals.find(g => g.id === c.goal_id), label: "Kanban" })),
+    ...kanbanCards.filter(c => ((c.status === "done" && stampISO(c.completed_at) === iso) || (c.done_log || []).some(e => e.date === iso)) && !listed({ type: "kanban", cardId: c.id }))
+      .map(c => ({ key: `c-${c.id}`, text: c.title, goal: goals.find(g => g.id === c.goal_id) || c.area, label: c.goal_id || c.area ? null : "Area item" })),
     ...goals.flatMap(g => (g.milestones || []).filter(m => m.done && stampISO(m.done_at) === iso && !listed({ type: "milestone", goalId: g.id, milestoneId: m.id }))
       .map(m => ({ key: `m-${m.id}`, text: m.text, goal: g }))),
   ];
@@ -1533,7 +1651,7 @@ function DayTasks({ iso, dailyTasks, habits, kanbanCards = [], goals = [] }) {
               return (
                 <li key={t.id} className="flex items-start gap-2.5">
                   <span className={`mt-0.5 w-4 h-4 rounded-full flex items-center justify-center flex-shrink-0 ${st.dot}`}>{Icon && <Icon size={10} strokeWidth={3}/>}</span>
-                  <span className="text-sm"><span className={st.text}>{src?.title || t.text}</span>{t.status === "skipped" && <span className="ml-1.5 text-xs text-slate-400">skipped</span>}{src && <span className="ml-1.5"><GoalChip goal={src.goal} label={src.goal ? null : "Kanban"}/></span>}</span>
+                  <span className="text-sm"><span className={st.text}>{src?.title || t.text}</span>{t.status === "skipped" && <span className="ml-1.5 text-xs text-slate-400">skipped</span>}{src && <span className="ml-1.5"><GoalChip goal={src.goal} area={src.area} label={src.goal || src.area ? null : "Area item"}/></span>}</span>
                 </li>
               );
             })}
@@ -1719,29 +1837,33 @@ function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
 // 
 // TASKS TAB
 // 
-function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
+function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, areas, addArea, updateArea, moveArea, deleteArea, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
   const [section, setSection] = useState("daily");
   return (
     <div>
       <div className="mb-5">
         <Segmented value={section} onChange={setSection}
-          options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"kanban",label:"Kanban",icon:Calendar},{id:"goals",label:"Goals",icon:Flag}]}/>
+          options={[{id:"daily",label:"Daily",icon:CheckSquare},{id:"areas",label:"Areas",icon:LayoutList},{id:"goals",label:"Goals",icon:Flag}]}/>
       </div>
       {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit} kanbanCards={kanbanCards} goals={goals} links={links}/>}
-      {section==="kanban" && <KanbanSection isMobile={isMobile} kanbanCards={kanbanCards} addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard} goals={goals} links={links}/>}
+      {section==="areas"  && <AreasSection isMobile={isMobile} items={kanbanCards} addItem={addKanbanCard} updateItem={updateKanbanCard} deleteItem={deleteKanbanCard}
+                                areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
+                                goals={goals} dailyTasks={dailyTasks} links={links}/>}
       {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} links={links}/>}
     </div>
   );
 }
 
-// Cards due on a day. Today also carries everything overdue, including overdue cards finished today so they can be unticked.
-const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => c.due_date && (c.due_date === iso
-  || (iso === todayISO() && c.due_date < iso && (c.status !== "done" || stampISO(c.completed_at) === iso))));
+// Area items due on a day. Today also carries everything overdue, including overdue items finished today so they can be unticked.
+// Weekly items live on the Areas checklist rather than piling up here each week.
+const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => { const { due, done, cad } = itemState(c); return cad !== "weekly" && due && (due === iso
+  || (iso === todayISO() && due < iso && (!done || stampISO(c.completed_at) === iso))); });
 
-// Cards due in the six days after a day: a heads-up list, not part of that day's own tally.
-// Only for today onwards; a card finished early stays listed on the day it was finished so it can be unticked.
-const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => c.due_date && c.due_date > iso && c.due_date <= addDaysISO(iso, 6)
-  && (c.status !== "done" || stampISO(c.completed_at) === iso));
+// Items due in the six days after a day: a heads-up list, not part of that day's own tally.
+// Only for today onwards; an item finished early stays listed on the day it was finished so it can be unticked.
+const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => { const { due, done, cad } = itemState(c); return cad !== "weekly" && due && due > iso && due <= addDaysISO(iso, 6)
+  && (!done || stampISO(c.completed_at) === iso); });
+const dueOf = (c) => itemState(c).due;
 
 function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, deleteHabit, kanbanCards, goals, links }) {
   const [showPicker, setShowPicker] = useState(false);
@@ -1760,28 +1882,34 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
   const putTasks = (nextTasks) => saveDailyTasks({ ...dailyTasks, [viewDate]: { tasks: [...nextTasks, ...habitItems] } });
   const isToday = viewDate === todayISO();
   const isTom   = viewDate === tomorrow();
-  // Kanban cards due this day show up on their own, unless they're already planned as one of its tasks
+  // Area items due this day show up on their own, unless they're already planned as one of its tasks
   const dueCards = cardsDueOn(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
-    .sort((a, b) => a.due_date.localeCompare(b.due_date));
+    .sort((a, b) => dueOf(a).localeCompare(dueOf(b)));
   const upcomingCards = cardsComingUp(kanbanCards, viewDate).filter(c => !isPlannedOn(dailyTasks, viewDate, { type: "kanban", cardId: c.id }))
-    .sort((a, b) => a.due_date.localeCompare(b.due_date));
-  const dueDone = dueCards.filter(c => c.status === "done").length;
+    .sort((a, b) => dueOf(a).localeCompare(dueOf(b)));
+  const dueDone = dueCards.filter(c => itemState(c).done).length;
   const total   = tasks.length + dueCards.length;
   const done    = tasks.filter(t=>t.status==="complete").length + dueDone;
   const skipped = tasks.filter(t=>t.status==="skipped").length;
   const pending = tasks.filter(t=>t.status==="pending").length + dueCards.length - dueDone;
 
-  // Open milestones and cards that could be pulled onto this day
+  // Open milestones and area items that could be pulled onto this day: goal items under their goal, the rest under their area
+  const asPick = (c) => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } });
+  const openItems = kanbanCards.filter(c => { const st = itemState(c); return !st.done && !st.upcoming; });
+  const looseItems = openItems.filter(c => !goals.some(g => g.id === c.goal_id));
+  const areaIds = [...new Set(looseItems.map(c => c.area?.id || null))];
   const pickable = [
     ...goals.map(g => ({
       key: g.id, goal: g, title: g.title,
       items: [
         ...(g.milestones || []).filter(m => !m.done).map(m => ({ key: `m-${m.id}`, text: m.text, source: { type: "milestone", goalId: g.id, milestoneId: m.id } })),
-        ...kanbanCards.filter(c => c.goal_id === g.id && c.status !== "done").map(c => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } })),
+        ...openItems.filter(c => c.goal_id === g.id).map(asPick),
       ],
     })),
-    { key: "board", goal: null, title: "Kanban board",
-      items: kanbanCards.filter(c => c.status !== "done" && !goals.some(g => g.id === c.goal_id)).map(c => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } })) },
+    ...areaIds.map(id => {
+      const area = looseItems.find(c => (c.area?.id || null) === id)?.area || null;
+      return { key: `a-${id}`, goal: area, title: area?.name || "Unsorted", items: looseItems.filter(c => (c.area?.id || null) === id).map(asPick) };
+    }),
   ].map(grp => ({ ...grp, items: grp.items.filter(i => !isPlannedOn(dailyTasks, viewDate, i.source) && !dueCards.some(c => c.id === i.card?.id)) }))
    .filter(grp => grp.items.length > 0);
   const hasLinkables = goals.some(g => (g.milestones || []).length) || kanbanCards.length > 0;
@@ -1863,7 +1991,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
             {days14.map(d => {
               const t = tasksOn(dailyTasks, d);
               const due = cardsDueOn(kanbanCards, d).filter(c => !isPlannedOn(dailyTasks, d, { type: "kanban", cardId: c.id }));
-              const dueOpen = due.some(c => c.status !== "done");
+              const dueOpen = due.some(c => !itemState(c).done);
               const allDone = t.length+due.length>0 && t.every(x=>x.status==="complete") && !dueOpen;
               const hasPending = t.some(x=>x.status==="pending") || dueOpen;
               const isActive = d===viewDate;
@@ -1899,7 +2027,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
           {shownTasks.map(t => {
             const src = sourceOf(t);
             const label = src?.title || t.text;
-            const chip = src && <GoalChip goal={src.goal} label={src.goal ? null : "Kanban"}/>;
+            const chip = src && <GoalChip goal={src.goal} area={src.area} label={src.goal || src.area ? null : "Area item"}/>;
             return (
               <div key={t.id} ref={el => { rowRefs.current[t.id] = el; }}
                 className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border transition-colors ${dragId===t.id?"ring-2 ring-blue-400 shadow-lg relative z-10":""} ${t.status==="complete"?"bg-emerald-50 border-emerald-100 opacity-75":t.status==="skipped"?"bg-slate-50 border-slate-100 opacity-60":"bg-white border-slate-200"}`}>
@@ -1968,26 +2096,26 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
             );
           })}
         </div>
-        {[["Due on the Kanban board", dueCards], ["Coming up this week", upcomingCards]].map(([heading, cards]) => cards.length > 0 && (
+        {[["Due from your areas", dueCards], ["Coming up this week", upcomingCards]].map(([heading, cards]) => cards.length > 0 && (
           <div key={heading} className="mb-4">
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">{heading}</p>
             <div className="space-y-2">
               {cards.map(c => {
-                const cardDone = c.status === "done";
-                const overdue = !cardDone && c.due_date < todayISO();
+                const { done: cardDone, due } = itemState(c);
+                const overdue = !cardDone && due < todayISO();
                 return (
                   <div key={c.id} className={`flex items-center gap-2 px-3 ${isMobile?"py-3":"py-2.5"} rounded-lg border ${cardDone?"bg-emerald-50 border-emerald-100 opacity-75":"bg-white border-slate-200"}`}>
-                    <button onClick={() => links.setSourceDone({ type: "kanban", cardId: c.id }, !cardDone)} aria-label={cardDone ? "Reopen card" : "Mark card done"}
+                    <button onClick={() => links.setSourceDone({ type: "kanban", cardId: c.id }, !cardDone)} aria-label={cardDone ? "Reopen item" : "Mark item done"}
                       className={`${isMobile?"w-9 h-9":"w-6 h-6"} rounded-full flex items-center justify-center flex-shrink-0 border transition-all touch-manipulation ${cardDone?"bg-emerald-500 border-emerald-500 text-white":"border-slate-300 text-slate-300 hover:border-emerald-400 hover:text-emerald-500"}`}>
                       <Check size={isMobile?15:12}/>
                     </button>
                     <div className="flex-1 min-w-0">
                       <span className={`${isMobile?"text-base":"text-sm"} ${cardDone?"line-through text-slate-400":"text-slate-700"}`}>{c.title}</span>
                       <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                        {overdue && <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {isoToLabel(c.due_date)}</span>}
-                        {c.due_date > viewDate && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">Due {c.due_date === addDaysISO(viewDate, 1) && isToday ? "tomorrow" : isoToLong(c.due_date)}</span>}
-                        {c.status === "inprogress" && <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS.inprogress}`}>{KANBAN_LABELS.inprogress}</span>}
-                        <GoalChip goal={goals.find(g => g.id === c.goal_id)}/>
+                        {overdue && <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {isoToLabel(due)}</span>}
+                        {due > viewDate && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">Due {due === addDaysISO(viewDate, 1) && isToday ? "tomorrow" : isoToLong(due)}</span>}
+                        {repeatLabel(c) && <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(c)}</span>}
+                        <GoalChip goal={goals.find(g => g.id === c.goal_id)} area={c.area}/>
                       </div>
                     </div>
                   </div>
@@ -2003,7 +2131,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
         {hasLinkables && (
           <div className="mt-3">
             <button onClick={() => setShowPicker(v => !v)} className="flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 py-1">
-              <Flag size={14}/> Add from goals and Kanban {showPicker ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
+              <Flag size={14}/> Add from goals and areas {showPicker ? <ChevronUp size={14}/> : <ChevronDown size={14}/>}
             </button>
             {showPicker && (
               <div className="mt-2 space-y-3">
@@ -2019,7 +2147,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                           className={`w-full flex items-center gap-2 px-3 ${isMobile?"py-2.5":"py-1.5"} rounded-lg border border-slate-200 hover:bg-slate-50 text-left touch-manipulation`}>
                           <Plus size={14} className="text-slate-400 flex-shrink-0"/>
                           <span className="flex-1 min-w-0 text-sm text-slate-700 truncate">{i.text}</span>
-                          <span className="text-xs text-slate-400 flex-shrink-0">{i.card ? (i.card.due_date ? `Card · due ${isoToLabel(i.card.due_date)}` : "Card") : "Milestone"}</span>
+                          <span className="text-xs text-slate-400 flex-shrink-0">{i.card ? (dueOf(i.card) ? `Due ${isoToLabel(dueOf(i.card))}` : "Item") : "Milestone"}</span>
                         </button>
                       ))}
                     </div>
@@ -2131,265 +2259,613 @@ function HabitManager({ habits, onAdd, onDelete, onDone }) {
   );
 }
 
-// Done cards completed before the current two-week bucket (which starts this week's Sunday) are archived.
-const currentBucketStart = () => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return toISO(d); };
-const cardDoneDate = (c) => c.completed_at ? toISO(new Date(c.completed_at)) : (c.due_date || (c.created_at ? toISO(new Date(c.created_at)) : todayISO()));
-const isArchivedCard = (c, bucketStart) => c.status === "done" && cardDoneDate(c) < bucketStart;
+//
+// AREAS
+// The standing list of things to stay on top of, grouped under fixed life areas.
+// Each item can be one-off or repeating, and can be put on any day's task list.
+//
+const DEFAULT_AREAS = [
+  { name: "Health",            color: "emerald" },
+  { name: "Home",              color: "amber"   },
+  { name: "Money",             color: "blue"    },
+  { name: "Car",               color: "slate"   },
+  { name: "Admin & paperwork", color: "violet"  },
+  { name: "Relationships",     color: "fuchsia" },
+  { name: "Work",              color: "cyan"    },
+];
 
-function KanbanSection({ isMobile, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, goals, links }) {
-  const [newGoal, setNewGoal]           = useState("");
-  const [editCardGoal, setEditCardGoal] = useState("");
-  const goalOf = (card) => goals.find(g => g.id === card.goal_id);
-  const goalSelect = (value, onChange, cls) => goals.length > 0 && (
-    <select value={value} onChange={e => onChange(e.target.value)} aria-label="Goal" className={cls}>
-      <option value="">No goal</option>
-      {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
-    </select>
-  );
-  const [kanbanView, setKanbanView]   = useState("board");
-  const [showAddCard, setShowAddCard] = useState(false);
-  const [newTitle, setNewTitle]       = useState("");
-  const [newDue, setNewDue]           = useState("");
-  const [newStatus, setNewStatus]     = useState("todo");
-  const [editingCard, setEditingCard] = useState(null);
-  const [editCardTitle, setEditCardTitle] = useState("");
-  const [editCardDue, setEditCardDue] = useState("");
-  const [showArchive, setShowArchive] = useState(false);
-  const [mobileColumn, setMobileColumn] = useState("todo");
-  const [calStart, setCalStart]       = useState(currentBucketStart);
-  const [calSelectedDay, setCalSelectedDay] = useState(null);
+const dueBadge = (due, verb = "Due") => {
+  if (!due) return null;
+  const d = daysUntil(due);
+  const v = verb.toLowerCase();
+  if (d < 0)  return { text: d === -1 ? "1 day overdue" : `${-d} days overdue`, cls: "bg-rose-50 text-rose-700 ring-rose-200" };
+  if (d === 0) return { text: `${verb} today`, cls: "bg-amber-50 text-amber-800 ring-amber-200" };
+  if (d === 1) return { text: `${verb} tomorrow`, cls: "bg-amber-50 text-amber-800 ring-amber-200" };
+  if (d <= 7)  return { text: `${verb} in ${d} days`, cls: "bg-sky-50 text-sky-700 ring-sky-200" };
+  return { text: `${v === "due" ? "Due" : verb} ${isoToLabel(due)}`, cls: "bg-slate-50 text-slate-600 ring-slate-200" };
+};
 
-  const calDays14 = Array.from({ length: 14 }, (_, i) => addDaysISO(calStart, i));
-  const calEnd = calDays14[13];
-  const shiftCal = (weeks) => { setCalStart(addDaysISO(calStart, weeks * 7)); setCalSelectedDay(null); };
-  const calPeriodCards = kanbanCards.filter(c => c.due_date && c.due_date >= calStart && c.due_date <= calEnd);
-  const calDoneCount   = calPeriodCards.filter(c => c.status === "done").length;
+// "Dec 1 – Dec 20", "until Jan 15", "from Dec 1" for items that cover or recur over a period
+const periodLabel = (c) => {
+  if (cadenceOf(c) === "once") return c.start_date && c.due_date ? `${isoToLabel(c.start_date)} – ${isoToLabel(c.due_date)}` : null;
+  if (c.start_date && c.end_date) return c.start_date > todayISO() ? `${isoToLabel(c.start_date)} – ${isoToLabel(c.end_date)}` : `until ${isoToLabel(c.end_date)}`;
+  if (c.end_date) return `until ${isoToLabel(c.end_date)}`;
+  if (c.start_date && c.start_date > todayISO()) return `from ${isoToLabel(c.start_date)}`;
+  return null;
+};
 
-  const bucketStart = currentBucketStart();
-  const archivedCards = kanbanCards.filter(c => isArchivedCard(c, bucketStart))
-    .sort((a,b) => cardDoneDate(b).localeCompare(cardDoneDate(a)));
+// Upcoming last, then overdue first, soonest due, undated (oldest first)
+const sortItems = (list) => [...list].sort((a, b) => {
+  const sa = itemState(a), sb = itemState(b);
+  if (sa.upcoming !== sb.upcoming) return sa.upcoming ? 1 : -1;
+  const da = sa.upcoming ? a.start_date : sa.due, db = sb.upcoming ? b.start_date : sb.due;
+  if (da && db && da !== db) return da.localeCompare(db);
+  if (!!da !== !!db) return da ? -1 : 1;
+  return (a.created_at || "").localeCompare(b.created_at || "");
+});
 
-  const handleAdd = async () => {
-    if (!newTitle.trim()) return;
-    await addKanbanCard({ title: newTitle.trim(), status: newStatus, due_date: newDue||null, goal_id: newGoal||null, completed_at: newStatus === "done" ? new Date().toISOString() : null });
-    setNewTitle(""); setNewDue(""); setNewStatus("todo"); setNewGoal(""); setShowAddCard(false);
-  };
-
-  const moveCard = links.moveKanbanCard;
-
-  const saveCardEdit = async (cardId) => {
-    if (!editCardTitle.trim()) return;
-    await updateKanbanCard(cardId, { title: editCardTitle.trim(), due_date: editCardDue || null, goal_id: editCardGoal || null });
-    setEditingCard(null);
-  };
-
-  const dueBadge = (card) => {
-    if (!card.due_date) return <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-400 rounded">No due date</span>;
-    const label = isoToLabel(card.due_date);
-    if (card.status !== "done" && card.due_date < todayISO()) return <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {label}</span>;
-    return <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">{label}</span>;
-  };
-
-  const renderCard = (card) => {
-    const status = card.status;
-    const nextStatus = status==="todo"?"inprogress":status==="inprogress"?"done":null;
-    const prevStatus = status==="done"?"inprogress":status==="inprogress"?"todo":null;
-    if (editingCard === card.id) return (
-      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100 space-y-2">
-        <input value={editCardTitle} onChange={e => setEditCardTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && saveCardEdit(card.id)}
-          className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500" placeholder="Card title" autoFocus/>
-        <input type="date" value={editCardDue} onChange={e => setEditCardDue(e.target.value)} className="w-full px-2 py-1 text-sm border border-slate-200 rounded"/>
-        {goalSelect(editCardGoal, setEditCardGoal, "w-full px-2 py-1 text-sm border border-slate-200 rounded bg-white")}
-        <div className="flex gap-1">
-          <button onClick={() => saveCardEdit(card.id)} className="flex-1 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 font-medium">Save</button>
-          <button onClick={() => setEditingCard(null)} className="flex-1 py-1 text-xs bg-slate-200 text-slate-600 rounded hover:bg-slate-300">Cancel</button>
-        </div>
-      </div>
-    );
-    const goal = goalOf(card);
-    return (
-      <div key={card.id} className="bg-slate-50 rounded-lg p-3 border border-slate-100" style={goal ? { borderLeft: `3px solid ${goalHex(goal)}` } : undefined}>
-        <div className="flex items-start justify-between gap-1 mb-2">
-          <span className={`text-sm font-medium leading-tight flex-1 ${status==="done"?"text-slate-500 line-through":"text-slate-800"}`}>{card.title}</span>
-          <div className="flex gap-0.5 flex-shrink-0">
-            <button onClick={() => { setEditingCard(card.id); setEditCardTitle(card.title); setEditCardDue(card.due_date || ""); setEditCardGoal(goalOf(card) ? card.goal_id : ""); }}
-              className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-blue-600 touch-manipulation`} title="Edit card"><Edit2 size={14}/></button>
-            <button onClick={() => deleteKanbanCard(card.id)}
-              className={`${isMobile?"p-2":"p-0.5"} text-slate-300 hover:text-red-400 touch-manipulation`} title="Delete card"><Trash2 size={14}/></button>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">{dueBadge(card)}<GoalChip goal={goal}/></div>
-        <div className="flex gap-1 mt-2">
-          {prevStatus && <button onClick={() => moveCard(card, prevStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-slate-100 text-slate-500 touch-manipulation`}>← Back</button>}
-          {nextStatus && <button onClick={() => moveCard(card, nextStatus)} className={`flex-1 ${isMobile?"py-2":"py-1"} text-xs bg-white border border-slate-200 rounded hover:bg-blue-50 text-blue-600 font-medium touch-manipulation`}>Move →</button>}
-        </div>
-      </div>
-    );
-  };
-
+function PlanMenu({ planned, onPlan, isMobile }) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(addDaysISO(todayISO(), 2));
+  const plan = (iso) => { onPlan(iso); setOpen(false); };
   return (
-    <div className="space-y-4">
-      <div className="flex gap-2">
-        {kanbanView === "board" && (
-          <button onClick={()=>setShowAddCard(!showAddCard)} className="flex-1 py-2.5 bg-slate-800 text-white rounded-xl hover:bg-slate-900 flex items-center justify-center gap-2 text-sm font-medium">
-            <Plus size={16}/> Add Card
-          </button>
-        )}
-        {kanbanView === "calendar" && <p className="flex-1 self-center text-sm font-semibold text-slate-700">Due dates · 2 weeks</p>}
-        <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-          {[{id:"board",icon:CheckSquare,label:"Board"},{id:"calendar",icon:Calendar,label:"Calendar"}].map(({id,icon:Icon,label}) => (
-            <button key={id} onClick={() => setKanbanView(id)} aria-label={label} title={label}
-              className={`px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium transition-all ${kanbanView===id?"bg-white shadow text-slate-900":"text-slate-500"}`}>
-              <Icon size={16}/>{!isMobile && label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {kanbanView === "calendar" && (
-        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <button onClick={() => shiftCal(-2)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronLeft size={16} className="text-slate-500"/></button>
-            <div className="text-center">
-              <p className="text-sm font-bold text-slate-800">{isoToLabel(calStart)} – {isoToLabel(calEnd)}</p>
-              <p className="text-xs text-slate-400 mt-0.5">{calPeriodCards.length} cards due · <span className="text-emerald-600 font-medium">{calDoneCount} done</span></p>
-            </div>
-            <button onClick={() => shiftCal(2)} className="p-2 hover:bg-slate-100 rounded-lg"><ChevronRight size={16} className="text-slate-500"/></button>
-          </div>
-          <div className="grid grid-cols-7 gap-0.5">
-            {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d => (
-              <div key={d} className="text-center text-xs font-semibold text-slate-400 py-1">{d}</div>
-            ))}
-            {calDays14.map(iso => {
-              const dayCards = kanbanCards.filter(c => c.due_date === iso);
-              const doneCards = dayCards.filter(c => c.status === "done");
-              const overdueCards = dayCards.filter(c => c.status !== "done" && iso < todayISO());
-              const isToday = iso === todayISO();
-              const isSelected = iso === calSelectedDay;
-              return (
-                <button key={iso} onClick={() => setCalSelectedDay(isSelected ? null : iso)}
-                  className={`aspect-square rounded-lg flex flex-col items-center justify-center text-xs transition-all border
-                    ${isSelected ? "bg-blue-600 text-white border-blue-600"
-                      : isToday ? "border-blue-300 bg-blue-50"
-                      : dayCards.length > 0 ? "border-slate-200 bg-slate-50 hover:bg-slate-100"
-                      : "border-transparent hover:bg-slate-50"}`}>
-                  <span className={`font-semibold ${isSelected?"text-white":isToday?"text-blue-600":"text-slate-600"}`}>
-                    {new Date(iso+"T00:00:00").getDate()}
-                  </span>
-                  {dayCards.length > 0 && (
-                    <span className={`text-[9px] leading-none mt-0.5 font-medium ${isSelected?"text-white":overdueCards.length>0?"text-red-500":doneCards.length===dayCards.length?"text-emerald-600":"text-blue-500"}`}>
-                      {doneCards.length}/{dayCards.length}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-          {calSelectedDay && (() => {
-            const dayCards = kanbanCards.filter(c => c.due_date === calSelectedDay);
-            if (dayCards.length === 0) return <p className="text-xs text-slate-400 text-center py-2">No cards due on {isoToLabel(calSelectedDay)}</p>;
-            return (
-              <div className="space-y-1.5 border-t border-slate-100 pt-3">
-                <p className="text-xs font-semibold text-slate-500 mb-2">Cards due {isoToLabel(calSelectedDay)}</p>
-                {dayCards.map(card => (
-                  <div key={card.id} className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-lg border border-slate-100">
-                    <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${KANBAN_COLORS[card.status]}`}>{KANBAN_LABELS[card.status]}</span>
-                    <span className="text-sm text-slate-700 flex-1">{card.title}</span>
-                    <GoalChip goal={goalOf(card)}/>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      {kanbanView === "board" && <>
-      {showAddCard && (
-        <div className="bg-white rounded-xl border border-slate-200 p-5">
-          <h3 className="font-semibold text-slate-800 mb-4">New Card</h3>
-          <div className="space-y-3">
-            <input value={newTitle} onChange={e=>setNewTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && handleAdd()} placeholder="Card title" className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
-            <div className="grid grid-cols-2 gap-2">
-              <select value={newStatus} onChange={e=>setNewStatus(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white">
-                {KANBAN_STATUSES.map(s=><option key={s} value={s}>{KANBAN_LABELS[s]}</option>)}
-              </select>
-              <input type="date" value={newDue} onChange={e=>setNewDue(e.target.value)} className="px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
-            </div>
-            {goalSelect(newGoal, setNewGoal, "w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white")}
-            <div className="flex gap-2">
-              <button onClick={handleAdd} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700">Add Card</button>
-              <button onClick={()=>setShowAddCard(false)} className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm hover:bg-slate-200">Cancel</button>
-            </div>
+    <div className="relative flex-shrink-0">
+      <button onClick={() => setOpen(o => !o)} aria-label="Add to a day's tasks" title="Add to a day's tasks"
+        className={`flex items-center gap-1 rounded-lg text-xs font-medium transition-colors touch-manipulation ${isMobile ? "px-2.5 py-2" : "px-2 py-1"} ${planned ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:text-blue-700 hover:bg-blue-50"}`}>
+        {planned ? <Check size={14}/> : <CalendarPlus size={14}/>}
+        <span className={isMobile ? "sr-only" : ""}>{planned ? "On today" : "Plan"}</span>
+      </button>
+      {open && <>
+        <div className="fixed inset-0 z-30" onClick={() => setOpen(false)}/>
+        <div className="absolute right-0 top-full mt-1 z-40 w-52 bg-white rounded-xl shadow-lg ring-1 ring-slate-200 p-1.5">
+          <p className="px-2 pt-1 pb-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wide">Add to tasks for</p>
+          <button onClick={() => plan(todayISO())} className="w-full text-left px-2 py-2 rounded-lg text-sm text-slate-700 hover:bg-slate-50">Today</button>
+          <button onClick={() => plan(tomorrow())} className="w-full text-left px-2 py-2 rounded-lg text-sm text-slate-700 hover:bg-slate-50">Tomorrow</button>
+          <div className="flex items-center gap-1.5 px-1 pt-1">
+            <input type="date" value={date} min={todayISO()} onChange={e => setDate(e.target.value)} className="flex-1 min-w-0 px-2 py-1.5 border border-slate-200 rounded-lg text-sm"/>
+            <button onClick={() => date && plan(date)} className="px-2.5 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">Add</button>
           </div>
         </div>
-      )}
-      {isMobile && (
-        <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
-          {KANBAN_STATUSES.map(status => {
-            const count = kanbanCards.filter(c => c.status===status && !isArchivedCard(c, bucketStart)).length;
-            return (
-              <button key={status} onClick={() => setMobileColumn(status)}
-                className={`flex-1 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-1.5 transition-all ${mobileColumn===status?"bg-white shadow text-slate-900":"text-slate-500"}`}>
-                {KANBAN_LABELS[status]}
-                <span className={`text-xs font-bold px-1.5 rounded-full ${mobileColumn===status ? KANBAN_COLORS[status] : "bg-slate-200 text-slate-500"}`}>{count}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-      <div className={`grid ${isMobile?"grid-cols-1":"grid-cols-3"} gap-4`}>
-        {KANBAN_STATUSES.filter(status => !isMobile || status === mobileColumn).map(status => {
-          const cards = kanbanCards.filter(c => c.status===status && !isArchivedCard(c, bucketStart));
-          return (
-            <div key={status} className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-              {!isMobile && (
-                <div className={`px-4 py-3 flex items-center justify-between ${KANBAN_COLORS[status]}`}>
-                  <span className="font-semibold text-sm">{KANBAN_LABELS[status]}</span>
-                  <span className="text-xs font-bold bg-white bg-opacity-60 px-2 py-0.5 rounded-full">{cards.length}</span>
-                </div>
-              )}
-              <div className="p-3 space-y-2 min-h-[80px]">
-                {cards.length===0 && <p className="text-xs text-slate-400 text-center py-3">{status === "done" ? "Nothing done in this two-week window yet" : "No cards"}</p>}
-                {cards.map(renderCard)}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      {archivedCards.length > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <button onClick={() => setShowArchive(a => !a)} className="w-full flex items-center justify-between px-4 py-3 hover:bg-slate-50 text-left">
-            <span className="text-sm font-semibold text-slate-600">Archived done cards <span className="ml-1 text-xs font-bold bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{archivedCards.length}</span></span>
-            {showArchive ? <ChevronUp size={16} className="text-slate-400"/> : <ChevronDown size={16} className="text-slate-400"/>}
-          </button>
-          {showArchive && (
-            <div className="border-t border-slate-100 px-4 py-2 divide-y divide-slate-100">
-              {groupByMonth(archivedCards, c => new Date(cardDoneDate(c) + "T00:00:00")).map(group => (
-                <div key={group.key} className="py-2">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">{group.label}</p>
-                  {group.items.map(card => (
-                    <div key={card.id} className="flex items-center gap-2 py-1.5">
-                      <Check size={13} className="text-emerald-500 flex-shrink-0"/>
-                      <span className="flex-1 text-sm text-slate-600 truncate">{card.title}</span>
-                      <span className="text-xs text-slate-400 flex-shrink-0">{isoToLabel(cardDoneDate(card))}</span>
-                      <button onClick={() => moveCard(card, "inprogress")} className="text-xs text-blue-500 hover:text-blue-700 font-medium flex-shrink-0 px-2 py-2">Reopen</button>
-                      <button onClick={() => deleteKanbanCard(card.id)} className="p-2 -mr-2 text-slate-300 hover:text-red-400 flex-shrink-0" title="Delete card"><Trash2 size={15}/></button>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       </>}
     </div>
   );
 }
 
+function ItemRow({ item, isMobile, goals, plannedToday, onCheck, onUncheck, onPlan, onEdit }) {
+  const st = itemState(item);
+  const { done, due, cad } = st;
+  const goal = goals.find(g => g.id === item.goal_id);
+  const last = cad !== "once" ? lastDoneOf(item) : null;
+  const period = periodLabel(item);
+  const isSpan = cad === "once" && item.start_date && item.due_date;
+  let badge = null;
+  if (st.upcoming) badge = { text: `Starts ${isoToLabel(item.start_date)}`, cls: "bg-slate-50 text-slate-600 ring-slate-200" };
+  else if (st.ended) badge = { text: "Finished", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" };
+  else if (cad === "weekly") badge = done ? { text: "Done this week", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" }
+    : st.target > 1 ? { text: `${st.count} of ${st.target} this week`, cls: st.count ? "bg-sky-50 text-sky-700 ring-sky-200" : "bg-slate-50 text-slate-600 ring-slate-200" } : null;
+  else if (!done) badge = dueBadge(due, isSpan ? "Ends" : "Due");
+  // A weekly item done some of its times shows its tally; tapping adds one, and once the week's done tapping takes the last one back
+  const partial = cad === "weekly" && st.target > 1 && st.count > 0 && !done;
+  // Recurring items take one check-off per day
+  const checkable = !st.upcoming && !st.ended && !(cad === "weekly" && !done && st.doneToday);
+  return (
+    <div className={`group flex items-center gap-2.5 px-3 sm:px-4 last:rounded-b-2xl ${isMobile ? "py-3" : "py-2.5"} ${done || st.upcoming ? "bg-slate-50/60" : "hover:bg-slate-50/70"}`}>
+      <button onClick={done ? onUncheck : onCheck} disabled={!checkable && !done} aria-label={done ? "Undo" : "Check off"} title={partial && st.doneToday ? "Checked off today" : undefined}
+        className={`${isMobile ? "w-8 h-8" : "w-5 h-5"} rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-all touch-manipulation disabled:cursor-default ${partial && st.doneToday ? "bg-sky-50" : ""} ${done ? "bg-emerald-500 border-emerald-500 text-white" : partial ? "border-sky-400 text-sky-600" : "border-slate-300 text-transparent hover:border-emerald-500 hover:text-emerald-500"}`}>
+        {partial ? <span className={`${isMobile ? "text-xs" : "text-[10px]"} font-bold`}>{st.count}</span> : <Check size={isMobile ? 15 : 11} strokeWidth={3}/>}
+      </button>
+      <button onClick={onEdit} className="flex-1 min-w-0 text-left touch-manipulation">
+        <span className={`block ${isMobile ? "text-[15px]" : "text-sm"} ${done && !(cad === "weekly" && !st.ended) ? "line-through text-slate-400" : done ? "text-slate-500" : "text-slate-800 font-medium"} truncate`}>{item.title}</span>
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 mt-0.5">
+          {badge && <span className={`text-[11px] px-1.5 py-0.5 rounded-md ring-1 ring-inset font-medium ${badge.cls}`}>{badge.text}</span>}
+          {cad === "once" && done && item.completed_at && <span className="text-[11px] text-slate-400">Done {isoToLabel(stampISO(item.completed_at))}</span>}
+          {cad === "every" && <span className="text-[11px] text-slate-500 inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(item)}</span>}
+          {cad === "weekly" && !isPermanent(item) && <span className="text-[11px] text-slate-500 inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(item)}</span>}
+          {period && !st.upcoming && <span className="text-[11px] text-slate-500">{period}</span>}
+          {st.upcoming && period && cad !== "once" && <span className="text-[11px] text-slate-500">{period}</span>}
+          {cad === "every" && last && <span className="text-[11px] text-slate-400">· last done {last.date === todayISO() ? "today" : isoToLabel(last.date)}</span>}
+          {goal && <GoalChip goal={goal}/>}
+          {item.notes && <span className="text-[11px] text-slate-400 truncate max-w-[14rem]">· {item.notes}</span>}
+        </span>
+      </button>
+      {partial && <button onClick={onUncheck} className="p-1.5 text-slate-400 hover:text-slate-700 text-xs font-semibold flex-shrink-0" aria-label="Take one back" title="Take one back">−1</button>}
+      {!done && !st.upcoming && !st.ended && <PlanMenu planned={plannedToday} onPlan={onPlan} isMobile={isMobile}/>}
+    </div>
+  );
+}
+
+const ITEM_KINDS = [
+  { id: "recurring", label: "Recurring",       hint: "Weekly or every few days, ongoing or for a set stretch" },
+  { id: "period",    label: "Covers a period", hint: "Something that runs from one date to another" },
+  { id: "once",      label: "One-off",         hint: "Do it once, optionally by a date" },
+];
+
+function ItemEditor({ item, areas, goals, defaults = {}, onSave, onDelete, onClose }) {
+  const isNew = !item;
+  const src = item || defaults;
+  const cad0 = cadenceOf(src);
+  const today = todayISO();
+  const [title, setTitle]   = useState(src.title || "");
+  const [areaId, setAreaId] = useState(src.area_id || "");
+  const [kind, setKind]     = useState(cad0 !== "once" ? "recurring" : src.start_date ? "period" : "once");
+  const [freq, setFreq]     = useState(cad0 === "every" ? (REPEAT_OPTIONS.some(o => o[0] === src.repeat_days) ? String(src.repeat_days) : "custom") : "weekly");
+  const [perWeek, setPerWeek] = useState(src.per_week || 1);
+  const [customDays, setCustomDays] = useState(src.repeat_days && !REPEAT_OPTIONS.some(o => o[0] === src.repeat_days) ? String(src.repeat_days) : "");
+  const [bounded, setBounded] = useState(!!(src.end_date || (cad0 !== "once" && src.start_date)));
+  const [start, setStart]   = useState(src.start_date || "");
+  const [end, setEnd]       = useState(cad0 === "once" && src.start_date ? src.due_date || "" : src.end_date || "");
+  const [due, setDue]       = useState(src.due_date || "");
+  const [goalId, setGoalId] = useState(src.goal_id || "");
+  const [notes, setNotes]   = useState(src.notes || "");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const log = item?.done_log || [];
+  const everyDays = freq === "custom" ? (parseInt(customDays, 10) > 0 ? parseInt(customDays, 10) : null) : freq === "weekly" ? null : Number(freq);
+
+  const problem = !title.trim() ? "Give it a name."
+    : kind === "period" && (!start || !end) ? "Pick a start and end date."
+    : kind === "period" && end < start ? "The end date is before the start."
+    : kind === "recurring" && freq === "custom" && !everyDays ? "Enter how many days between."
+    : kind === "recurring" && bounded && !end ? "Pick when it stops, or make it ongoing."
+    : kind === "recurring" && bounded && start && end < start ? "The end date is before the start."
+    : null;
+
+  const save = () => {
+    if (problem) return;
+    const fields = { title: title.trim(), area_id: areaId || null, goal_id: goalId || null, notes: notes.trim() };
+    if (kind === "once") Object.assign(fields, { cadence: "once", repeat_days: null, start_date: null, end_date: null, due_date: due || null });
+    if (kind === "period") Object.assign(fields, { cadence: "once", repeat_days: null, start_date: start, end_date: null, due_date: end });
+    if (kind === "recurring") {
+      const s = bounded ? start || today : null;
+      Object.assign(fields, { start_date: bounded ? s : null, end_date: bounded ? end : null });
+      if (freq === "weekly") Object.assign(fields, { cadence: "weekly", per_week: perWeek, repeat_days: null, due_date: null });
+      else {
+        // Keep the next due date if it still makes sense, otherwise start the cycle at the start date (or today)
+        const keep = cad0 === "every" && src.due_date && (!s || src.due_date >= s) ? src.due_date : null;
+        Object.assign(fields, { cadence: "every", repeat_days: everyDays, due_date: due || keep || s || today });
+      }
+      // A recurring item never sits in "done"
+      if (item?.status === "done") { fields.status = "todo"; fields.completed_at = null; }
+    } else if (item && cad0 !== "once") { fields.status = "todo"; fields.done_log = []; }
+    onSave(fields);
+  };
+
+  const field = "w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:border-blue-400";
+  const label = "block text-xs font-medium text-slate-600 mb-1";
+  const chip = (active) => `px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${active ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`;
+  return (
+    <Sheet title={isNew ? "New task" : "Edit task"} onClose={onClose} closeOnBackdrop={false}>
+      <div className="space-y-4">
+        <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && save()} placeholder="What do you need to stay on top of?" className={field} autoFocus={isNew}/>
+
+        <div>
+          <span className={label}>Kind</span>
+          <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+            {ITEM_KINDS.map(k => <button key={k.id} onClick={() => setKind(k.id)} className={chip(kind === k.id)}>{k.label}</button>)}
+          </div>
+          <p className="text-xs text-slate-500 mt-1.5">{ITEM_KINDS.find(k => k.id === kind).hint}</p>
+        </div>
+
+        {kind === "recurring" && (
+          <div className="rounded-xl border border-slate-200 p-3 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className={label}>How often</span>
+                <select value={freq} onChange={e => setFreq(e.target.value)} className={field}>
+                  <option value="weekly">Every week</option>
+                  {REPEAT_OPTIONS.map(([d, l]) => <option key={d} value={d}>{l}</option>)}
+                  <option value="custom">Every … days</option>
+                </select>
+              </label>
+              {freq === "weekly" ? (
+                <label className="block">
+                  <span className={label}>Times a week</span>
+                  <select value={perWeek} onChange={e => setPerWeek(Number(e.target.value))} className={field}>
+                    {[1,2,3,4,5,6,7].map(n => <option key={n} value={n}>{n === 1 ? "Once" : `${n} times`}</option>)}
+                  </select>
+                </label>
+              ) : freq === "custom" ? (
+                <label className="block">
+                  <span className={label}>Days between</span>
+                  <input type="number" min="1" inputMode="numeric" value={customDays} onChange={e => setCustomDays(e.target.value)} className={field}/>
+                </label>
+              ) : (
+                <label className="block">
+                  <span className={label}>Next due</span>
+                  <input type="date" value={due} onChange={e => setDue(e.target.value)} className={field}/>
+                </label>
+              )}
+            </div>
+            <div>
+              <span className={label}>For how long</span>
+              <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl">
+                <button onClick={() => setBounded(false)} className={chip(!bounded)}>Ongoing</button>
+                <button onClick={() => setBounded(true)} className={chip(bounded)}>Set period</button>
+              </div>
+            </div>
+            {bounded && (
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block"><span className={label}>Starts</span><input type="date" value={start} placeholder={today} onChange={e => setStart(e.target.value)} className={field}/></label>
+                <label className="block"><span className={label}>Ends</span><input type="date" value={end} onChange={e => setEnd(e.target.value)} className={field}/></label>
+              </div>
+            )}
+            <p className="text-xs text-slate-500">
+              {freq === "weekly"
+                ? `Resets every Monday${perWeek > 1 ? `; done for the week after ${perWeek} check-offs` : ""}.`
+                : `Checking it off sets the next due date ${everyDays || "N"} days out.`}
+              {bounded ? " Stops after the end date." : ""}
+            </p>
+          </div>
+        )}
+
+        {kind === "period" && (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block"><span className={label}>Starts</span><input type="date" value={start} onChange={e => setStart(e.target.value)} className={field}/></label>
+            <label className="block"><span className={label}>Ends</span><input type="date" value={end} onChange={e => setEnd(e.target.value)} className={field}/></label>
+          </div>
+        )}
+
+        {kind === "once" && (
+          <label className="block"><span className={label}>Due (optional)</span><input type="date" value={due} onChange={e => setDue(e.target.value)} className={field}/></label>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block">
+            <span className={label}>Area</span>
+            <select value={areaId} onChange={e => setAreaId(e.target.value)} className={field}>
+              <option value="">Unsorted</option>
+              {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </label>
+          <label className="block">
+            <span className={label}>Goal</span>
+            <select value={goalId} onChange={e => setGoalId(e.target.value)} className={field}>
+              <option value="">No goal</option>
+              {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
+            </select>
+          </label>
+        </div>
+        <label className="block">
+          <span className={label}>Notes</span>
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Phone numbers, account details, what to bring…" className={`${field} resize-none`}/>
+        </label>
+        {log.length > 0 && (
+          <div>
+            <p className={label}>Checked off</p>
+            <div className="flex flex-wrap gap-1.5">
+              {[...log].reverse().slice(0, 14).map((e, i) => <span key={i} className="text-xs px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700">{isoToLabel(e.date)}</span>)}
+            </div>
+          </div>
+        )}
+        {problem && title.trim() && <p className="text-xs text-rose-600">{problem}</p>}
+        <div className="flex gap-2 pt-1">
+          <button onClick={save} disabled={!!problem} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-40">{isNew ? "Add task" : "Save"}</button>
+          {!isNew && (confirmDelete
+            ? <button onClick={onDelete} className="px-4 py-2.5 bg-rose-600 text-white rounded-lg text-sm font-semibold">Delete it</button>
+            : <button onClick={() => setConfirmDelete(true)} className="px-3 py-2.5 text-rose-600 hover:bg-rose-50 rounded-lg text-sm font-medium flex items-center gap-1"><Trash2 size={15}/> Delete</button>)}
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, onClose }) {
+  const [newName, setNewName] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const add = () => {
+    const name = newName.trim();
+    if (!name || areas.some(a => a.name.toLowerCase() === name.toLowerCase())) return;
+    addArea({ name, color: GOAL_COLORS[areas.length % GOAL_COLORS.length].id });
+    setNewName("");
+  };
+  return (
+    <Sheet title="Edit areas" onClose={onClose}>
+      <p className="text-sm text-slate-500 mb-4">These are the fixed parts of your life you want to stay on top of. Rename, recolor or reorder them here.</p>
+      <div className="space-y-2 mb-4">
+        {areas.map((a, i) => {
+          const count = items.filter(c => c.area_id === a.id).length;
+          return (
+            <div key={a.id} className="rounded-xl border border-slate-200 p-2.5">
+              <div className="flex items-center gap-2">
+                <div className="flex flex-col">
+                  <button onClick={() => moveArea(a.id, -1)} disabled={i === 0} className="p-0.5 text-slate-400 hover:text-slate-700 disabled:opacity-25" aria-label={`Move ${a.name} up`}><ArrowUp size={14}/></button>
+                  <button onClick={() => moveArea(a.id, 1)} disabled={i === areas.length - 1} className="p-0.5 text-slate-400 hover:text-slate-700 disabled:opacity-25" aria-label={`Move ${a.name} down`}><ArrowDown size={14}/></button>
+                </div>
+                <input defaultValue={a.name} onBlur={e => { const v = e.target.value.trim(); if (v && v !== a.name) updateArea(a.id, { name: v }); else e.target.value = a.name; }}
+                  onKeyDown={e => e.key === "Enter" && e.currentTarget.blur()}
+                  className="flex-1 min-w-0 px-2 py-1.5 border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg text-sm font-medium text-slate-800 focus:outline-none"/>
+                <span className="text-xs text-slate-400 flex-shrink-0">{count} task{count === 1 ? "" : "s"}</span>
+                {confirmDelete === a.id ? (
+                  <button onClick={() => { deleteArea(a.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-rose-600 text-white rounded-md font-semibold flex-shrink-0">Remove</button>
+                ) : (
+                  <button onClick={() => setConfirmDelete(a.id)} className="p-1.5 text-slate-300 hover:text-rose-500 flex-shrink-0" aria-label={`Remove ${a.name}`}><Trash2 size={15}/></button>
+                )}
+              </div>
+              <div className="flex gap-1.5 mt-2 ml-7">
+                {GOAL_COLORS.map(c => (
+                  <button key={c.id} onClick={() => updateArea(a.id, { color: c.id })} title={c.label} aria-label={`${c.label} for ${a.name}`}
+                    className={`w-5 h-5 rounded-full transition-transform ${a.color === c.id ? "ring-2 ring-offset-2 ring-slate-700 scale-110" : "hover:scale-110"}`} style={{ background: c.hex }}/>
+                ))}
+              </div>
+              {confirmDelete === a.id && <p className="text-xs text-rose-600 mt-2 ml-7">Its {count} task{count === 1 ? "" : "s"} will move to Unsorted. <button onClick={() => setConfirmDelete(null)} className="underline">Keep it</button></p>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex gap-2">
+        <input value={newName} onChange={e => setNewName(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} placeholder="New area, e.g. Pets" className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+        <button onClick={add} disabled={!newName.trim()} className="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-semibold disabled:opacity-40">Add</button>
+      </div>
+    </Sheet>
+  );
+}
+
+function QuickAdd({ placeholder, onAdd, onMore }) {
+  const [text, setText] = useState("");
+  const add = () => { const t = text.trim(); if (!t) return; setText(""); onAdd(t); };
+  return (
+    <div className="flex items-center gap-2 px-4 py-1.5">
+      <Plus size={14} className="text-slate-400 flex-shrink-0"/>
+      <input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} placeholder={placeholder} className="flex-1 min-w-0 py-1.5 bg-transparent text-sm focus:outline-none"/>
+      {text.trim()
+        ? <button onClick={add} className="text-sm font-medium text-blue-700 px-2">Add</button>
+        : onMore && <button onClick={onMore} className="text-xs font-medium text-slate-400 hover:text-blue-700 px-2 whitespace-nowrap">More options</button>}
+    </div>
+  );
+}
+
+function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, deleteArea, goals, dailyTasks, links }) {
+  const [filter, setFilter]       = useState("all"); // all | attention
+  const [showDone, setShowDone]   = useState(false);
+  const [collapsed, setCollapsed] = useState(() => { try { return JSON.parse(localStorage.getItem("mindfit.areas.collapsed") || "[]"); } catch { return []; } });
+  const [editing, setEditing]     = useState(null); // { item } or { defaults } for a new one
+  const [managing, setManaging]   = useState(false);
+  const today = todayISO();
+  const weekStart = weekStartISO(today);
+
+  const toggleCollapsed = (key) => setCollapsed(prev => {
+    const next = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
+    try { localStorage.setItem("mindfit.areas.collapsed", JSON.stringify(next)); } catch {}
+    return next;
+  });
+
+  const states = new Map(items.map(c => [c.id, itemState(c)]));
+  const st = (c) => states.get(c.id);
+  const weeklyAll = items.filter(c => isPermanent(c));
+  const weeklyDone = weeklyAll.filter(c => st(c).done).length;
+  const others = items.filter(c => !isPermanent(c));
+  const overdue = others.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due < today; });
+  const dueSoon = others.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due >= today && s.due <= addDaysISO(today, 7); });
+  const needsAttention = (c) => {
+    const s = st(c);
+    if (s.done || s.upcoming) return false;
+    if (s.cad === "weekly") return true;
+    return !!s.due && s.due <= addDaysISO(today, 7);
+  };
+  const plannedToday = (c) => isPlannedOn(dailyTasks, today, { type: "kanban", cardId: c.id });
+  const visible = (c) => {
+    const s = st(c);
+    const finished = (s.cad === "once" && s.done) || s.ended;
+    if (finished) return showDone;
+    return filter === "all" || needsAttention(c);
+  };
+
+  const groups = [
+    { key: "unsorted", area: null, items: items.filter(c => !c.area_id || !areas.some(a => a.id === c.area_id)) },
+    ...areas.map(a => ({ key: a.id, area: a, items: items.filter(c => c.area_id === a.id) })),
+  ].filter(g => g.area || g.items.length > 0);
+
+  const saveEditor = async (fields) => {
+    if (editing.item) await updateItem(editing.item.id, fields);
+    else await addItem({ status: "todo", ...fields });
+    setEditing(null);
+  };
+  const check = (c) => links.setSourceDone({ type: "kanban", cardId: c.id }, true);
+  // Takes back today's check-off (for weekly items, the latest one this week)
+  const uncheck = async (c) => {
+    if (sourceDone(c)) return links.setSourceDone({ type: "kanban", cardId: c.id }, false);
+    const fields = itemDoneFields(c, false);
+    if (fields) await updateItem(c.id, fields);
+  };
+  const row = (c) => (
+    <ItemRow key={c.id} item={c} isMobile={isMobile} goals={goals} plannedToday={plannedToday(c)}
+      onCheck={() => check(c)} onUncheck={() => uncheck(c)}
+      onPlan={(iso) => links.planSource({ type: "kanban", cardId: c.id }, c.title, iso)}
+      onEdit={() => setEditing({ item: c })}/>
+  );
+
+  const stat = (label, value, cls, active, onClick) => (
+    <button onClick={onClick} className={`flex-1 min-w-0 text-left rounded-xl px-3 py-2.5 ring-1 ring-inset transition-colors ${active ? "ring-blue-300 bg-blue-50" : "ring-slate-200 bg-white hover:bg-slate-50"}`}>
+      <span className={`block text-2xl font-bold leading-none ${cls}`}>{value}</span>
+      <span className="block text-xs text-slate-500 mt-1 truncate">{label}</span>
+    </button>
+  );
+  const subhead = (text, right) => (
+    <div className="flex items-center justify-between px-4 pt-3 pb-1">
+      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">{text}</span>
+      {right && <span className="text-[11px] text-slate-400">{right}</span>}
+    </div>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2">
+        {stat("This week", `${weeklyDone}/${weeklyAll.length}`, weeklyAll.length && weeklyDone === weeklyAll.length ? "text-emerald-600" : "text-slate-800", false, () => setFilter("attention"))}
+        {stat("Overdue", overdue.length, overdue.length ? "text-rose-600" : "text-slate-300", false, () => setFilter("attention"))}
+        {stat("Due in 7 days", dueSoon.length, dueSoon.length ? "text-amber-600" : "text-slate-300", false, () => setFilter("attention"))}
+      </div>
+
+      <div className="flex items-center gap-2">
+        <div className="flex gap-1 bg-slate-100 p-1 rounded-lg text-sm">
+          {[["all", "Everything"], ["attention", "To do now"]].map(([id, label]) => (
+            <button key={id} onClick={() => setFilter(id)} className={`px-3 py-1 rounded-md font-medium transition-all ${filter === id ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>
+          ))}
+        </div>
+        <label className="ml-auto flex items-center gap-1.5 text-sm text-slate-500 cursor-pointer select-none">
+          <input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)} className="rounded accent-blue-600"/> Finished
+        </label>
+        <button onClick={() => setManaging(true)} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg" aria-label="Edit areas" title="Edit areas"><Settings size={16}/></button>
+      </div>
+
+      {areas.length === 0 && items.length === 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          <Inbox size={30} className="text-slate-300 mx-auto mb-3"/>
+          <p className="text-slate-500 text-sm">Setting up your areas…</p>
+        </div>
+      )}
+
+      {groups.map(({ key, area, items: list }) => {
+        const hex = area ? goalHex(area) : "#94a3b8";
+        const weekly = list.filter(isPermanent);
+        const rest = list.filter(c => !isPermanent(c));
+        const weeklyShown = weekly.filter(visible);
+        const restShown = sortItems(rest.filter(visible));
+        const wDone = weekly.filter(c => st(c).done).length;
+        const late = rest.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due < today; }).length;
+        const isCollapsed = collapsed.includes(key);
+        if (filter === "attention" && weeklyShown.length + restShown.length === 0) return null;
+        const addWeekly = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "weekly", per_week: 1 });
+        const addOther  = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "once" });
+        return (
+          <section key={key} className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+            <div className={`flex items-center gap-2.5 px-4 py-3 rounded-t-2xl ${isCollapsed ? "rounded-b-2xl" : "border-b border-slate-100"}`} style={{ boxShadow: `inset 3px 0 0 ${hex}` }}>
+              <button onClick={() => toggleCollapsed(key)} className="flex-1 min-w-0 flex items-center gap-2.5 text-left" aria-expanded={!isCollapsed}>
+                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: hex }}/>
+                <h3 className="font-semibold text-slate-900 truncate">{area?.name || "Unsorted"}</h3>
+                {weekly.length > 0 && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded-md flex-shrink-0 ${wDone === weekly.length ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{wDone}/{weekly.length} this week</span>}
+                {late > 0 && <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-700 flex-shrink-0">{late} overdue</span>}
+                {isCollapsed ? <ChevronDown size={16} className="text-slate-400 flex-shrink-0 ml-auto"/> : <ChevronUp size={16} className="text-slate-400 flex-shrink-0 ml-auto"/>}
+              </button>
+              <button onClick={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "once" } })} className="p-1.5 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg" aria-label={`Add to ${area?.name || "Unsorted"}`}><Plus size={16}/></button>
+            </div>
+            {!isCollapsed && <div className="pb-1">
+              {(weekly.length > 0 || (area && filter === "all")) && <>
+                {subhead("Every week", `resets Mon · week of ${isoToLabel(weekStart)}`)}
+                <div className="divide-y divide-slate-100">{weeklyShown.map(row)}</div>
+                {weekly.length > 0 && weeklyShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">All done this week.</p>}
+                {area && filter === "all" && <QuickAdd placeholder="Add a weekly task" onAdd={addWeekly}/>}
+              </>}
+              {(rest.length > 0 || (area && filter === "all")) && <>
+                <div className={weekly.length > 0 || (area && filter === "all") ? "border-t border-slate-100 mt-1" : ""}>
+                  {subhead("Temporary & one-off")}
+                </div>
+                <div className="divide-y divide-slate-100">{restShown.map(row)}</div>
+                {rest.length > 0 && restShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">Nothing due right now.</p>}
+                {filter === "all" && <QuickAdd placeholder="Add a one-off task" onAdd={addOther}
+                  onMore={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "every", repeat_days: 3, end_date: addDaysISO(today, 14), start_date: today } })}/>}
+              </>}
+            </div>}
+          </section>
+        );
+      })}
+
+      {editing && (
+        <ItemEditor item={editing.item} defaults={editing.defaults} areas={areas} goals={goals}
+          onSave={saveEditor} onClose={() => setEditing(null)}
+          onDelete={async () => { await deleteItem(editing.item.id); setEditing(null); }}/>
+      )}
+      {managing && <AreaManager areas={areas} items={items} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea} onClose={() => setManaging(false)}/>}
+    </div>
+  );
+}
+
+//
+// AGENT CONNECTION
+// An AI agent such as Duet reaches MindFit through the mindfit-mcp edge function (an MCP server).
+// Each connection is a random token in the connector URL; only its SHA-256 hash is stored.
+//
+const MCP_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/mindfit-mcp`;
+const sha256Hex = async (text) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))))
+  .map(b => b.toString(16).padStart(2, "0")).join("");
+
+function AgentSheet({ session, onClose }) {
+  const [tokens, setTokens] = useState(null);
+  const [label, setLabel]   = useState("Duet");
+  const [created, setCreated] = useState(null); // the full URL, shown once
+  const [copied, setCopied] = useState(false);
+  const [error, setError]   = useState("");
+  const uid = session.user.id;
+
+  const load = async () => {
+    const { data, error } = await supabase.from("agent_tokens").select("id,label,created_at,last_used_at").eq("user_id", uid).order("created_at");
+    if (error) setError("Couldn't load connections. The database may need its latest migration.");
+    setTokens(data || []);
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async () => {
+    setError("");
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    const token = "mf_" + Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const { error } = await supabase.from("agent_tokens").insert({ user_id: uid, token_hash: await sha256Hex(token), label: label.trim() || "AI agent", timezone });
+    if (error) { setError(error.message); return; }
+    setCreated(`${MCP_URL}?key=${token}`);
+    setCopied(false);
+    load();
+  };
+
+  const revoke = async (id) => {
+    await supabase.from("agent_tokens").delete().eq("id", id).eq("user_id", uid);
+    setTokens(t => t.filter(x => x.id !== id));
+  };
+
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(created); setCopied(true); } catch { setCopied(false); }
+  };
+
+  return (
+    <Sheet title="Connect an AI agent" onClose={onClose}>
+      <div className="space-y-5">
+        <p className="text-sm text-slate-600">
+          Give an agent like Duet access to your areas and daily tasks. It can see what's overdue, add items, plan them onto a day and check things off.
+        </p>
+        <ol className="text-sm text-slate-600 space-y-1.5 list-decimal pl-5">
+          <li>Create a connector URL below and copy it.</li>
+          <li>In Duet, add a <span className="font-medium text-slate-800">custom connector</span> and paste the URL as its MCP server URL. No other sign-in is needed.</li>
+          <li>Ask it things like “what's overdue in my areas?” or “add renew passport to Admin, due March 1”.</li>
+        </ol>
+
+        {created ? (
+          <div className="rounded-xl bg-emerald-50 ring-1 ring-emerald-200 p-3">
+            <p className="text-sm font-semibold text-emerald-800 mb-1">Connector URL created</p>
+            <p className="text-xs text-emerald-700 mb-2">Copy it now. It won't be shown again, and anyone with it can read and change your tasks.</p>
+            <div className="flex gap-2">
+              <input readOnly value={created} onFocus={e => e.target.select()} className="flex-1 min-w-0 px-2 py-1.5 text-xs font-mono bg-white border border-emerald-200 rounded-lg"/>
+              <button onClick={copy} className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-medium flex items-center gap-1"><Copy size={14}/>{copied ? "Copied" : "Copy"}</button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Name, e.g. Duet" className="flex-1 min-w-0 px-3 py-2 border border-slate-200 rounded-lg text-sm"/>
+            <button onClick={create} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700">Create URL</button>
+          </div>
+        )}
+        {error && <p className="text-sm text-rose-600">{error}</p>}
+
+        <div>
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Connections</p>
+          {tokens === null ? <p className="text-sm text-slate-400">Loading…</p>
+            : tokens.length === 0 ? <p className="text-sm text-slate-400">None yet.</p>
+            : <div className="space-y-2">
+                {tokens.map(t => (
+                  <div key={t.id} className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-slate-200">
+                    <Bot size={16} className="text-slate-400 flex-shrink-0"/>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-800 truncate">{t.label}</p>
+                      <p className="text-xs text-slate-400">Created {isoToLabel(stampISO(t.created_at))} · {t.last_used_at ? `last used ${daysAgoLabel(new Date(t.last_used_at)).toLowerCase()}` : "not used yet"}</p>
+                    </div>
+                    <button onClick={() => revoke(t.id)} className="text-xs font-medium text-rose-600 hover:bg-rose-50 px-2 py-1 rounded-md">Revoke</button>
+                  </div>
+                ))}
+              </div>}
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
 // Each goal picks how its progress is tracked; milestones is the only type so far.
-// Kanban cards linked to the goal count as steps alongside its milestones.
+// Area items linked to the goal count as steps alongside its milestones.
 const GOAL_TRACKING_TYPES = [
   { id: "milestones", label: "Milestones checklist" },
 ];
@@ -2401,7 +2877,7 @@ const goalProgress = (g, kanbanCards = []) => {
   return { done, total, pct: total ? Math.round(done / total * 100) : 0, complete: total > 0 && done === total, msDone, msTotal: ms.length, cardsDone, cardsTotal: cards.length, cards };
 };
 const goalProgressLabel = (p) => !p.total ? "No milestones yet"
-  : [p.msTotal ? `${p.msDone} of ${p.msTotal} milestones` : null, p.cardsTotal ? `${p.cardsDone} of ${p.cardsTotal} cards` : null].filter(Boolean).join(" · ");
+  : [p.msTotal ? `${p.msDone} of ${p.msTotal} milestones` : null, p.cardsTotal ? `${p.cardsDone} of ${p.cardsTotal} items` : null].filter(Boolean).join(" · ");
 const newMilestone = (text) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2,7)}`, text, done: false });
 
 function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, links }) {
@@ -2551,7 +3027,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, lin
               </div>
               {prog.cards.length > 0 && (
                 <div className="mt-3 pt-3 border-t border-slate-100 space-y-1">
-                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-2 mb-1">Kanban cards</p>
+                  <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide px-2 mb-1">Area items</p>
                   {prog.cards.map(c => {
                     const cardDone = c.status === "done";
                     const source = { type: "kanban", cardId: c.id };
@@ -2564,7 +3040,7 @@ function GoalsSection({ goals, addGoal, updateGoal, deleteGoal, kanbanCards, lin
                           <span className={`flex-1 min-w-0 text-sm ${cardDone ? "line-through text-slate-400" : "text-slate-700"}`}>{c.title}</span>
                           {cardDone
                             ? c.completed_at && <span className="text-xs text-slate-400">{isoToLabel(stampISO(c.completed_at))}</span>
-                            : <span className={`text-xs flex-shrink-0 ${c.due_date && c.due_date < today ? "text-red-500 font-medium" : "text-slate-400"}`}>{c.due_date ? `${c.due_date < today ? "Overdue" : "Due"} ${isoToLabel(c.due_date)}` : KANBAN_LABELS[c.status]}</span>}
+                            : <span className={`text-xs flex-shrink-0 ${c.due_date && c.due_date < today ? "text-red-500 font-medium" : "text-slate-400"}`}>{c.due_date ? `${c.due_date < today ? "Overdue" : "Due"} ${isoToLabel(c.due_date)}` : (c.area?.name || "Open")}</span>}
                         </button>
                       </div>
                     );
@@ -2755,7 +3231,7 @@ function TrendsCard({ days, isMobile }) {
             </svg>
             {pts.length <= 45 && pts.map(p => (
               <div key={p.i} className={`absolute rounded-full ${metricColors(metric, p.v).bg} ${hover === p.i ? "w-3 h-3" : "w-2 h-2"}`}
-                style={{ left: `${p.x}%`, top: `${p.y}%`, transform: "translate(-50%,-50%)", boxShadow: "0 0 0 2px #0e1630" }}/>
+                style={{ left: `${p.x}%`, top: `${p.y}%`, transform: "translate(-50%,-50%)", boxShadow: "0 0 0 2px #ffffff" }}/>
             ))}
             {hover !== null && <div className="absolute top-0 bottom-0 border-l border-slate-400/60 pointer-events-none" style={{ left: `${xPct(hover)}%` }}/>}
           </div>
@@ -2826,7 +3302,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
   const workoutsByDate = {};
   workouts.forEach(w => { const d = parseWorkoutDate(w.date); if (isValidDate(d)) { const iso = toISO(d); workoutsByDate[iso] = (workoutsByDate[iso] || 0) + 1; } });
   const habitList = habits.map(h => ({ ...h, created: h.created_at ? toISO(new Date(h.created_at)) : today }));
-  // Steps toward a goal by the day they were finished: milestones plus Kanban cards linked to a goal
+  // Steps toward a goal by the day they were finished: milestones plus area items linked to a goal
   const goalStepDates = goals.map(g => ({ id: g.id, dates: [
     ...(g.milestones || []).filter(m => m.done && m.done_at).map(m => stampISO(m.done_at)),
     ...kanbanCards.filter(c => c.goal_id === g.id && c.status === "done" && c.completed_at).map(c => stampISO(c.completed_at)),
@@ -2950,7 +3426,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
 
       {showRhythm && (
         <div className={card}>
-          <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Calendar size={16} className="text-cyan-400"/> Weekly rhythm</h3>
+          <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Calendar size={16} className="text-cyan-600"/> Weekly rhythm</h3>
           <div className="grid grid-cols-7 gap-1.5 text-center">
             {rhythm.map(r => {
               const c = r.mood !== null ? MOOD_COLORS(r.mood) : null;
@@ -2973,7 +3449,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
       {cur.taskTotal > 0 && (
         <div className={card}>
           <div className="flex items-center justify-between mb-4">
-            <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckSquare size={16} className="text-cyan-400"/> Tasks</h3>
+            <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckSquare size={16} className="text-cyan-600"/> Tasks</h3>
             {streak > 0 && <span className="flex items-center gap-1 text-sm font-semibold text-amber-600"><Flame size={14}/>{streak}-day streak</span>}
           </div>
           <div className="grid grid-cols-3 gap-3 mb-3 text-center">
@@ -2984,7 +3460,7 @@ function InsightsTab({ session, isMobile, dailyTasks, kanbanCards, goals, habits
           <div className="h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-emerald-500 rounded-full" style={{ width: `${cur.completion || 0}%` }}/></div>
           {kanbanDone.length > 0 && (
             <div className="mt-4 pt-4 border-t border-slate-100">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Kanban cards finished</p>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2">Area items finished</p>
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-emerald-50 rounded-lg p-2 text-center"><div className="text-xl font-bold text-emerald-600">{timing.early}</div><div className="text-xs text-slate-500">Early</div></div>
                 <div className="bg-blue-50 rounded-lg p-2 text-center"><div className="text-xl font-bold text-blue-600">{timing.ontime}</div><div className="text-xs text-slate-500">On time</div></div>
