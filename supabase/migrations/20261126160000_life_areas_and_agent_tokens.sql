@@ -18,9 +18,16 @@ create index if not exists life_areas_user_id_idx on public.life_areas(user_id);
 alter table public.tasks_kanban
   add column if not exists area_id uuid references public.life_areas(id) on delete set null,
   add column if not exists notes text not null default '',
-  -- null = one-off; otherwise the item comes due again this many days after it's done
+  -- once:   a one-off; due_date is its deadline, and with start_date it covers a period (start_date to due_date)
+  -- weekly: resets every Monday; done for the week once checked off per_week times
+  -- every:  comes due again repeat_days after it's done
+  -- weekly/every items with an end_date are temporary: they stop recurring after it
+  add column if not exists cadence text not null default 'once' check (cadence in ('once', 'weekly', 'every')),
+  add column if not exists per_week integer not null default 1 check (per_week between 1 and 7),
   add column if not exists repeat_days integer check (repeat_days is null or repeat_days > 0),
-  -- completions of a repeating item: [{ "date": "YYYY-MM-DD", "prev_due": "YYYY-MM-DD" | null }], newest last
+  add column if not exists start_date date,
+  add column if not exists end_date date,
+  -- completions of a recurring item: [{ "date": "YYYY-MM-DD", "prev_due": "YYYY-MM-DD" | null }], newest last
   add column if not exists done_log jsonb not null default '[]'::jsonb;
 create index if not exists tasks_kanban_area_id_idx on public.tasks_kanban(area_id);
 

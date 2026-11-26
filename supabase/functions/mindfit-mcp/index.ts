@@ -7,8 +7,12 @@
 //
 // Data model (shared with the web app):
 // - life_areas: the user's fixed areas (Health, Home, ...)
-// - tasks_kanban: items to stay on top of. area_id, due_date, repeat_days (null = one-off),
-//   done_log [{date, prev_due}] for repeating items, status todo|inprogress|done for one-off items
+// - tasks_kanban: items to stay on top of, each in an area, with a cadence:
+//     once   - one-off; due_date is the deadline; with start_date it covers a period (start_date..due_date)
+//     weekly - resets every Monday; done for the week after per_week check-offs
+//     every  - comes due again repeat_days after it's done (due_date moves forward)
+//   weekly/every items with an end_date (and optionally start_date) are temporary; without one they're permanent.
+//   Recurring check-offs are kept in done_log [{date, prev_due}], at most one per day.
 // - tasks_daily: one row per (user, date) with tasks jsonb [{id, text, status, source?}] plus habit
 //   check-offs ({habitId}) kept after the tasks. source = {type:"kanban", cardId} links a task to an item.
 
@@ -17,9 +21,13 @@ import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
 const SUPPORTED_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const SERVER_INFO = { name: "mindfit", title: "MindFit", version: "1.0.0" };
 const INSTRUCTIONS = `MindFit is the user's personal tracker. "Areas" are fixed parts of their life (Health, Home, Money, ...).
-Each area holds items to stay on top of: one-off things with an optional due date, or repeating things (every N days) whose
-due date moves forward each time they're done. The daily task list holds what they plan to do on a given day; an item can be
-planned onto a day with add_task(item_id=...). Start with get_overview. Dates are YYYY-MM-DD in the user's time zone.`;
+Each area holds items to stay on top of:
+- permanent weekly items: a checklist that resets every Monday (optionally N times a week),
+- temporary recurring items: weekly or every N days, but only between a start and end date,
+- period items: something that runs from a start date to an end date,
+- one-off items with an optional due date, and permanent "every N days" upkeep (e.g. dentist every 180 days).
+The daily task list holds what the user plans to do on a given day; plan an item onto a day with add_task(item_id=...).
+Start with get_overview. Dates are YYYY-MM-DD in the user's time zone; weeks start on Monday.`;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -58,43 +66,88 @@ const resolveDate = (input: unknown, today: string) => {
 
 type Item = {
   id: string; title: string; status: string; due_date: string | null; area_id: string | null; goal_id: string | null;
-  notes: string; repeat_days: number | null; done_log: { date: string; prev_due: string | null }[]; completed_at: string | null; created_at: string;
+  notes: string; cadence?: string; per_week?: number; repeat_days: number | null; start_date?: string | null; end_date?: string | null;
+  done_log: { date: string; prev_due?: string | null }[]; completed_at: string | null; created_at: string;
 };
 type Area = { id: string; name: string; color: string; position: number };
 
+const cadenceOf = (c: Item) => c.cadence === "weekly" ? "weekly" : (c.cadence === "every" || c.repeat_days) ? "every" : "once";
+const weekStart = (iso: string) => { const d = new Date(iso + "T00:00:00Z"); return addDays(iso, -((d.getUTCDay() + 6) % 7)); };
 const lastDone = (c: Item) => (c.done_log?.length ? c.done_log[c.done_log.length - 1] : null);
-// Same rule as the app: a repeating item finished today still reads as done today
+
+// Same rules as the app (src/App.jsx itemState)
 const itemState = (c: Item, today: string) => {
-  const last = lastDone(c);
-  if (c.repeat_days && last && last.date === today) return { done: true, due: last.prev_due };
-  return { done: c.status === "done", due: c.due_date };
-};
-const doneFields = (c: Item, done: boolean, today: string): Json | null => {
-  if (c.repeat_days) {
-    const log = c.done_log || [];
-    if (done) return { status: "todo", done_log: [...log, { date: today, prev_due: c.due_date }], due_date: addDays(today, c.repeat_days), completed_at: new Date().toISOString() };
-    const last = log[log.length - 1];
-    if (!last) return null;
-    const rest = log.slice(0, -1);
-    return { done_log: rest, due_date: last.prev_due, completed_at: rest.length ? new Date(rest[rest.length - 1].date + "T12:00:00Z").toISOString() : null };
+  const log = c.done_log || [];
+  const cad = cadenceOf(c);
+  const upcoming = !!c.start_date && c.start_date > today;
+  const doneToday = cad === "once" ? c.status === "done" && (c.completed_at || "").slice(0, 10) === today : log.some((e) => e.date === today);
+  if (cad === "weekly") {
+    const ws = weekStart(today), we = addDays(ws, 6);
+    const ended = !!c.end_date && c.end_date < today;
+    const count = log.filter((e) => e.date >= ws && e.date <= we).length;
+    const target = c.per_week || 1;
+    return { cad, count, target, upcoming, ended, doneToday, done: ended || (!upcoming && count >= target), due: upcoming || ended ? null : (c.end_date && c.end_date < we ? c.end_date : we) };
   }
-  return { status: done ? "done" : "todo", completed_at: done ? new Date().toISOString() : null };
+  if (cad === "every") {
+    const last = lastDone(c);
+    if (last && last.date === today) return { cad, upcoming, ended: false, doneToday, done: true, due: last.prev_due ?? null };
+    const ended = !!c.end_date && (c.end_date < today || (!!c.due_date && c.due_date > c.end_date));
+    return { cad, upcoming, ended, doneToday, done: ended, due: ended ? null : c.due_date || c.start_date || null };
+  }
+  return { cad, upcoming, ended: false, doneToday, done: c.status === "done", due: c.due_date };
+};
+// What a daily task planned from the item mirrors: recurring items are checked off a day at a time
+const sourceDone = (c: Item, today: string) => { const s = itemState(c, today); return s.cad === "once" ? s.done : s.doneToday; };
+
+const doneFields = (c: Item, done: boolean, today: string): Json | null => {
+  const cad = cadenceOf(c);
+  const log = c.done_log || [];
+  if (cad === "once") return { status: done ? "done" : "todo", completed_at: done ? new Date().toISOString() : null };
+  if (done) {
+    const entry = { date: today, prev_due: c.due_date };
+    return cad === "weekly"
+      ? { done_log: [...log, entry], completed_at: new Date().toISOString() }
+      : { done_log: [...log, entry], due_date: addDays(today, c.repeat_days || 1), completed_at: new Date().toISOString() };
+  }
+  const from = cad === "weekly" ? weekStart(today) : today;
+  let i = log.length - 1;
+  while (i >= 0 && log[i].date < from) i--;
+  if (i < 0) return null;
+  const rest = [...log.slice(0, i), ...log.slice(i + 1)];
+  const fields: Json = { done_log: rest, completed_at: rest.length ? new Date(rest[rest.length - 1].date + "T12:00:00Z").toISOString() : null };
+  if (cad === "every") fields.due_date = log[i].prev_due ?? null;
+  return fields;
+};
+
+const kindOf = (c: Item) => {
+  const cad = cadenceOf(c);
+  if (cad === "once") return c.start_date ? "period" : "one_off";
+  if (c.end_date || c.start_date) return cad === "weekly" ? "temporary_weekly" : "temporary_every_n_days";
+  return cad === "weekly" ? "permanent_weekly" : "every_n_days";
 };
 
 const describeItem = (c: Item, areas: Area[], today: string) => {
-  const { done, due } = itemState(c, today);
-  const daysUntil = due ? Math.round((Date.parse(due + "T00:00:00Z") - Date.parse(today + "T00:00:00Z")) / 86400000) : null;
+  const s = itemState(c, today);
+  const daysUntil = s.due ? Math.round((Date.parse(s.due + "T00:00:00Z") - Date.parse(today + "T00:00:00Z")) / 86400000) : null;
   return {
     id: c.id,
     title: c.title,
     area: areas.find((a) => a.id === c.area_id)?.name ?? "Unsorted",
-    done,
-    due_date: due,
-    overdue: !done && daysUntil !== null && daysUntil < 0,
-    days_until_due: daysUntil,
-    repeats_every_days: c.repeat_days,
-    next_due_date: c.repeat_days ? c.due_date : undefined,
-    last_done: c.repeat_days ? lastDone(c)?.date ?? null : (c.status === "done" && c.completed_at ? c.completed_at.slice(0, 10) : null),
+    kind: kindOf(c),
+    done: s.done,
+    checked_off_today: s.cad === "once" ? undefined : s.doneToday,
+    this_week: s.cad === "weekly" ? `${s.count} of ${s.target}` : undefined,
+    times_per_week: s.cad === "weekly" ? s.target : undefined,
+    repeats_every_days: s.cad === "every" ? c.repeat_days : undefined,
+    starts: c.start_date || undefined,
+    ends: (s.cad === "once" ? (c.start_date ? c.due_date : undefined) : c.end_date) || undefined,
+    not_started_yet: s.upcoming || undefined,
+    finished_period: s.ended || undefined,
+    due_date: s.cad === "weekly" ? undefined : s.due,
+    next_due_date: s.cad === "every" ? c.due_date : undefined,
+    overdue: s.cad !== "weekly" && !s.done && !s.upcoming && daysUntil !== null && daysUntil < 0,
+    days_until_due: s.cad === "weekly" ? undefined : daysUntil,
+    last_done: s.cad === "once" ? (c.status === "done" && c.completed_at ? c.completed_at.slice(0, 10) : null) : lastDone(c)?.date ?? null,
     notes: c.notes || undefined,
   };
 };
@@ -139,9 +192,14 @@ const newTaskId = () => Date.now() + Math.floor(Math.random() * 1000);
 
 // Marks an item done/undone and keeps today's planned tasks for it in step (as the app does)
 async function setItemDone(ctx: Ctx, item: Item, done: boolean, today: string) {
-  if (itemState(item, today).done === done) return item;
+  const s = itemState(item, today);
+  if (s.upcoming || s.ended) throw new ToolError(s.upcoming ? `"${item.title}" doesn't start until ${item.start_date}.` : `"${item.title}" has finished its period.`);
+  if (sourceDone(item, today) === done) {
+    if (done) return item; // already checked off today (recurring items take one check-off a day)
+    if (s.cad !== "weekly") return item;
+  }
   const fields = doneFields(item, done, today);
-  if (!fields) throw new ToolError("This repeating item has no completion to undo.");
+  if (!fields) throw new ToolError("There's no check-off to undo.");
   const { data, error } = await ctx.db.from("tasks_kanban").update(fields).eq("id", item.id).eq("user_id", ctx.userId).select().single();
   if (error) throw new Error(error.message);
   const tasks = await loadDay(ctx, today);
@@ -154,6 +212,49 @@ async function setItemDone(ctx: Ctx, item: Item, done: boolean, today: string) {
   return data as Item;
 }
 
+// Turns the schedule arguments of add_item/update_item into item columns
+const SCHEDULES = ["weekly", "every_n_days", "period", "one_off"];
+const scheduleOf = (c: Item) => { const cad = cadenceOf(c); return cad === "weekly" ? "weekly" : cad === "every" ? "every_n_days" : c.start_date ? "period" : "one_off"; };
+function scheduleFields(a: Json, today: string, prev?: Item): Json {
+  const has = (k: string) => Object.prototype.hasOwnProperty.call(a, k);
+  const schedule = String(a.schedule ?? (prev ? scheduleOf(prev) : (a.repeat_every_days != null ? "every_n_days" : "one_off")));
+  if (!SCHEDULES.includes(schedule)) throw new ToolError(`schedule must be one of ${SCHEDULES.join(", ")}.`);
+  const date = (k: string, fallback: unknown) => {
+    const v = has(k) ? a[k] : fallback;
+    if (v === null || v === undefined || v === "") return null;
+    if (!isISODate(v)) throw new ToolError(`${k} must be YYYY-MM-DD.`);
+    return v;
+  };
+  const prevEnd = prev ? (cadenceOf(prev) === "once" ? (prev.start_date ? prev.due_date : null) : prev.end_date) : null;
+  const start = date("start_date", prev?.start_date);
+  const end = date("end_date", prevEnd);
+  if (start && end && end < start) throw new ToolError("end_date is before start_date.");
+  if (schedule === "one_off") return { cadence: "once", repeat_days: null, start_date: null, end_date: null, due_date: date("due_date", prev && cadenceOf(prev) === "once" ? prev.due_date : null) };
+  if (schedule === "period") {
+    if (!start || !end) throw new ToolError("A period needs start_date and end_date.");
+    return { cadence: "once", repeat_days: null, start_date: start, end_date: null, due_date: end };
+  }
+  const reopen = prev?.status === "done" ? { status: "todo", completed_at: null } : {};
+  if (schedule === "weekly") {
+    const n = Number(a.times_per_week ?? prev?.per_week ?? 1);
+    if (!(Number.isInteger(n) && n >= 1 && n <= 7)) throw new ToolError("times_per_week must be 1-7.");
+    return { cadence: "weekly", per_week: n, repeat_days: null, due_date: null, start_date: end ? start || today : start, end_date: end, ...reopen };
+  }
+  const days = Number(a.repeat_every_days ?? prev?.repeat_days);
+  if (!(Number.isInteger(days) && days > 0)) throw new ToolError("every_n_days needs repeat_every_days (a positive integer).");
+  const s0 = end ? start || today : start;
+  return { cadence: "every", repeat_days: days, start_date: s0, end_date: end, due_date: date("due_date", prev?.due_date) || s0 || today, ...reopen };
+}
+
+const scheduleProps = {
+  schedule: { type: "string", enum: SCHEDULES, description: "weekly: a checklist item that resets every Monday. every_n_days: comes due again N days after it's done. period: runs from start_date to end_date. one_off: done once, optional due_date." },
+  times_per_week: { type: "integer", minimum: 1, maximum: 7, description: "weekly only. Default 1." },
+  repeat_every_days: { type: "integer", minimum: 1, description: "every_n_days only, e.g. 2, 30, 180." },
+  start_date: { type: ["string", "null"], description: "YYYY-MM-DD. For weekly/every_n_days, with end_date makes it temporary (defaults to today)." },
+  end_date: { type: ["string", "null"], description: "YYYY-MM-DD. weekly/every_n_days stop recurring after it; required for period. Omit for a permanent recurring item." },
+  due_date: { type: ["string", "null"], description: "YYYY-MM-DD. one_off deadline, or the first/next due date for every_n_days." },
+};
+
 // ---------- tools ----------
 
 const dateProp = { type: "string", description: "YYYY-MM-DD, or 'today' / 'tomorrow'. Defaults to today." };
@@ -162,20 +263,27 @@ const TOOLS: { name: string; title: string; description: string; inputSchema: Js
   {
     name: "get_overview",
     title: "Overview",
-    description: "Start here. Today's date, each area with its open item count, everything overdue or due in the next 7 days, and today's task list.",
+    description: "Start here. Today's date, each area's weekly progress and open items, weekly items still to do this week, everything overdue or due in the next 7 days, and today's task list.",
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true },
     run: async (ctx) => {
       const today = localToday(ctx.tz);
       const [areas, items, tasks] = await Promise.all([loadAreas(ctx), loadItems(ctx), loadDay(ctx, today)]);
-      const open = items.filter((c) => !itemState(c, today).done).map((c) => describeItem(c, areas, today));
+      const all = items.map((c) => describeItem(c, areas, today));
+      const open = all.filter((i) => !i.done && !i.not_started_yet);
+      const weekly = all.filter((i) => i.kind === "permanent_weekly");
+      const areaNames = [...areas.map((a) => a.name), ...(all.some((i) => i.area === "Unsorted") ? ["Unsorted"] : [])];
       return {
         today,
+        week_starts: weekStart(today),
         timezone: ctx.tz,
-        areas: [...areas.map((a) => ({ name: a.name, open_items: open.filter((i) => i.area === a.name).length })),
-          ...(open.some((i) => i.area === "Unsorted") ? [{ name: "Unsorted", open_items: open.filter((i) => i.area === "Unsorted").length }] : [])],
+        areas: areaNames.map((name) => {
+          const w = weekly.filter((i) => i.area === name);
+          return { name, weekly_done: `${w.filter((i) => i.done).length} of ${w.length}`, other_open_items: open.filter((i) => i.area === name && i.kind !== "permanent_weekly").length };
+        }),
+        weekly_still_to_do: open.filter((i) => i.kind === "permanent_weekly" || i.kind === "temporary_weekly"),
         overdue: open.filter((i) => i.overdue),
-        due_next_7_days: open.filter((i) => i.days_until_due !== null && i.days_until_due >= 0 && i.days_until_due <= 7),
+        due_next_7_days: open.filter((i) => i.days_until_due != null && i.days_until_due >= 0 && i.days_until_due <= 7),
         today_tasks: tasks.filter((t) => !t.habitId).map((t) => ({ id: t.id, text: t.text, status: t.status, item_id: t.source?.type === "kanban" ? t.source.cardId : undefined })),
       };
     },
@@ -225,21 +333,20 @@ const TOOLS: { name: string; title: string; description: string; inputSchema: Js
       const area = await findArea(ctx, areas, a.area);
       let list = items.filter((c) => !area || c.area_id === area.id).map((c) => describeItem(c, areas, today));
       if (!a.include_done) list = list.filter((i) => !i.done);
-      if (typeof a.due_within_days === "number") list = list.filter((i) => i.days_until_due !== null && i.days_until_due <= (a.due_within_days as number));
+      if (typeof a.due_within_days === "number") list = list.filter((i) => i.days_until_due != null && i.days_until_due <= (a.due_within_days as number));
       return list.sort((x, y) => (x.due_date && y.due_date) ? x.due_date.localeCompare(y.due_date) : x.due_date ? -1 : y.due_date ? 1 : 0);
     },
   },
   {
     name: "add_item",
     title: "Add item",
-    description: "Track a new thing under an area. Use repeat_every_days for recurring upkeep (e.g. 180 for a dentist cleaning); due_date is then the next time it's due.",
+    description: "Track something under an area. Examples: permanent weekly chore -> schedule=weekly; '3 times a week for the next month' -> schedule=weekly, times_per_week=3, end_date; 'every 2 days until Dec 20' -> every_n_days with end_date; dentist every 6 months -> every_n_days, repeat_every_days=180; 'Dec 1 to Dec 20' -> period; plain to-do -> one_off.",
     inputSchema: {
       type: "object",
       properties: {
         title: { type: "string" },
         area: { type: "string", description: "Area name. Omit to leave it unsorted." },
-        due_date: { type: "string", description: "YYYY-MM-DD" },
-        repeat_every_days: { type: "integer", minimum: 1, description: "7 weekly, 30 monthly, 90 quarterly, 365 yearly." },
+        ...scheduleProps,
         notes: { type: "string" },
       },
       required: ["title"],
@@ -247,62 +354,55 @@ const TOOLS: { name: string; title: string; description: string; inputSchema: Js
     run: async (ctx, a) => {
       const title = String(a.title || "").trim();
       if (!title) throw new ToolError("title is required.");
-      if (a.due_date != null && !isISODate(a.due_date)) throw new ToolError("due_date must be YYYY-MM-DD.");
-      const repeat = a.repeat_every_days == null ? null : Number(a.repeat_every_days);
-      if (repeat !== null && !(Number.isInteger(repeat) && repeat > 0)) throw new ToolError("repeat_every_days must be a positive integer.");
+      const today = localToday(ctx.tz);
       const areas = await loadAreas(ctx);
       const area = await findArea(ctx, areas, a.area);
       const { data, error } = await ctx.db.from("tasks_kanban").insert({
-        user_id: ctx.userId, title, status: "todo", area_id: area?.id ?? null, due_date: (a.due_date as string) ?? null,
-        repeat_days: repeat, notes: typeof a.notes === "string" ? a.notes : "",
+        user_id: ctx.userId, title, status: "todo", area_id: area?.id ?? null, notes: typeof a.notes === "string" ? a.notes : "",
+        ...scheduleFields(a, today),
       }).select().single();
       if (error) throw new Error(error.message);
-      return describeItem(data as Item, areas, localToday(ctx.tz));
+      return describeItem(data as Item, areas, today);
     },
   },
   {
     name: "update_item",
     title: "Update item",
-    description: "Change an item's title, area, due date, repetition or notes. Pass null to clear due_date or repeat_every_days.",
+    description: "Change an item's title, area, notes or schedule. Schedule fields you don't pass keep their current values; pass null to clear a date.",
     inputSchema: {
       type: "object",
       properties: {
         item_id: { type: "string" },
         title: { type: "string" },
         area: { type: "string" },
-        due_date: { type: ["string", "null"] },
-        repeat_every_days: { type: ["integer", "null"], minimum: 1 },
+        ...scheduleProps,
         notes: { type: "string" },
       },
       required: ["item_id"],
     },
     run: async (ctx, a) => {
+      const today = localToday(ctx.tz);
       const item = await getItem(ctx, a.item_id);
       const areas = await loadAreas(ctx);
       const fields: Json = {};
       if (typeof a.title === "string" && a.title.trim()) fields.title = a.title.trim();
       if (a.area !== undefined) fields.area_id = (await findArea(ctx, areas, a.area))?.id ?? null;
-      if (a.due_date !== undefined) {
-        if (a.due_date !== null && !isISODate(a.due_date)) throw new ToolError("due_date must be YYYY-MM-DD or null.");
-        fields.due_date = a.due_date;
-      }
-      if (a.repeat_every_days !== undefined) {
-        const r = a.repeat_every_days === null ? null : Number(a.repeat_every_days);
-        if (r !== null && !(Number.isInteger(r) && r > 0)) throw new ToolError("repeat_every_days must be a positive integer or null.");
-        fields.repeat_days = r;
-        if (r && item.status === "done") { fields.status = "todo"; fields.completed_at = null; }
-      }
       if (typeof a.notes === "string") fields.notes = a.notes;
+      if (Object.keys(scheduleProps).some((k) => k in a)) {
+        Object.assign(fields, scheduleFields(a, today, item));
+        // Switching to a one-off clears the recurring history
+        if (fields.cadence === "once" && cadenceOf(item) !== "once") Object.assign(fields, { status: "todo", done_log: [] });
+      }
       if (Object.keys(fields).length === 0) throw new ToolError("Nothing to update.");
       const { data, error } = await ctx.db.from("tasks_kanban").update(fields).eq("id", item.id).eq("user_id", ctx.userId).select().single();
       if (error) throw new Error(error.message);
-      return describeItem(data as Item, areas, localToday(ctx.tz));
+      return describeItem(data as Item, areas, today);
     },
   },
   {
     name: "complete_item",
     title: "Complete item",
-    description: "Mark an item done (or undo with undone=true). A repeating item logs today as done and moves its due date forward by its interval.",
+    description: "Check an item off for today (or undo with undone=true). One-off/period items become done. Weekly items count toward this week's times_per_week. every_n_days items log today and move their due date forward. Recurring items take one check-off per day.",
     inputSchema: { type: "object", properties: { item_id: { type: "string" }, undone: { type: "boolean" } }, required: ["item_id"] },
     run: async (ctx, a) => {
       const today = localToday(ctx.tz);
@@ -327,7 +427,7 @@ const TOOLS: { name: string; title: string; description: string; inputSchema: Js
   {
     name: "get_day",
     title: "Get a day's tasks",
-    description: "The task list for a day (default today), plus area items due that day.",
+    description: "The task list for a day (default today), plus area items (not weekly ones) due that day.",
     inputSchema: { type: "object", properties: { date: dateProp } },
     annotations: { readOnlyHint: true },
     run: async (ctx, a) => {
@@ -341,7 +441,7 @@ const TOOLS: { name: string; title: string; description: string; inputSchema: Js
           const item = t.source?.type === "kanban" ? items.find((c) => c.id === t.source!.cardId) : undefined;
           return { id: t.id, text: item?.title ?? t.text, status: t.status, item_id: item?.id, area: item ? describeItem(item, areas, today).area : undefined };
         }),
-        items_due: items.filter((c) => { const s = itemState(c, today); return !s.done && s.due && (s.due === date || (date === today && s.due < date)); })
+        items_due: items.filter((c) => { const s = itemState(c, today); return s.cad !== "weekly" && !s.done && !s.upcoming && s.due && (s.due === date || (date === today && s.due < date)); })
           .filter((c) => !planned.has(c.id)).map((c) => describeItem(c, areas, today)),
       };
     },

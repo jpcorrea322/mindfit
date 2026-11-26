@@ -53,40 +53,75 @@ const habitStreak  = (dailyTasks, habitId, fromISO) => {
 const isoToLabel = (iso) => { if (!iso) return ""; const d = new Date(iso + "T00:00:00"); return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
 
 // Areas hold the things to stay on top of. Each item (a row of tasks_kanban, kept under its old name)
-// belongs to an area and is either one-off (status done/todo) or repeats every `repeat_days` days.
-// A repeating item never becomes "done": finishing it logs the date in done_log and pushes due_date forward.
-const REPEAT_OPTIONS = [[7, "Every week"], [14, "Every 2 weeks"], [30, "Every month"], [90, "Every 3 months"], [180, "Every 6 months"], [365, "Every year"]];
-const repeatLabel = (days) => !days ? null : REPEAT_OPTIONS.find(o => o[0] === days)?.[1] || `Every ${days} days`;
-const lastDoneOf = (c) => { const log = c.done_log || []; return log.length ? log[log.length - 1] : null; };
-// Today's view of an item: a repeating item finished today still reads as done, on the due date it had before
-const itemState = (c) => {
-  const last = lastDoneOf(c);
-  if (c.repeat_days && last && last.date === todayISO()) return { done: true, due: last.prev_due };
-  return { done: c.status === "done", due: c.due_date };
+// belongs to an area and has a cadence:
+// - once:   a one-off. due_date is its deadline; with start_date it covers a period (start_date to due_date).
+// - weekly: resets every Monday; it's done for the week once checked off per_week times.
+// - every:  comes due again repeat_days after it's done (due_date moves forward).
+// Weekly and every items with an end_date are temporary: they stop recurring after it. Without one they're permanent.
+// Recurring completions are kept in done_log as [{ date, prev_due }], newest last.
+const REPEAT_OPTIONS = [[2, "Every 2 days"], [3, "Every 3 days"], [14, "Every 2 weeks"], [30, "Every month"], [90, "Every 3 months"], [180, "Every 6 months"], [365, "Every year"]];
+const cadenceOf = (c) => c.cadence === "weekly" ? "weekly" : (c.cadence === "every" || c.repeat_days) ? "every" : "once";
+const weekStartISO = (iso = todayISO()) => { const d = new Date(iso + "T00:00:00"); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return toISO(d); };
+const repeatLabel = (c) => {
+  const cad = cadenceOf(c);
+  if (cad === "weekly") return (c.per_week || 1) > 1 ? `${c.per_week}× a week` : "Weekly";
+  if (cad === "every") return REPEAT_OPTIONS.find(o => o[0] === c.repeat_days)?.[1] || `Every ${c.repeat_days} days`;
+  return null;
 };
-// Fields that complete or reopen an item
+const lastDoneOf = (c) => { const log = c.done_log || []; return log.length ? log[log.length - 1] : null; };
+const isPermanent = (c) => cadenceOf(c) === "weekly" && !c.end_date && !c.start_date;
+
+// Where an item stands today.
+// done: nothing left to do right now (for weekly: this week's target met; for a temporary recurring item: its period is over)
+// due: the date it's next due (null when there's nothing due), upcoming: its period hasn't started, ended: its period is over
+// doneToday: checked off today (what a task planned from it on today's list mirrors)
+const itemState = (c) => {
+  const today = todayISO();
+  const log = c.done_log || [];
+  const cad = cadenceOf(c);
+  const upcoming = !!c.start_date && c.start_date > today;
+  const doneToday = cad === "once" ? c.status === "done" && stampISO(c.completed_at) === today : log.some(e => e.date === today);
+  if (cad === "weekly") {
+    const ws = weekStartISO(today), we = addDaysISO(ws, 6);
+    const ended = !!c.end_date && c.end_date < today;
+    const count = log.filter(e => e.date >= ws && e.date <= we).length;
+    const target = c.per_week || 1;
+    return { cad, count, target, upcoming, ended, doneToday, done: ended || (!upcoming && count >= target), due: upcoming || ended ? null : (c.end_date && c.end_date < we ? c.end_date : we) };
+  }
+  if (cad === "every") {
+    const last = lastDoneOf(c);
+    if (last && last.date === today) return { cad, upcoming, ended: false, doneToday, done: true, due: last.prev_due };
+    const ended = !!c.end_date && (c.end_date < today || (c.due_date && c.due_date > c.end_date));
+    return { cad, upcoming, ended, doneToday, done: ended, due: ended ? null : c.due_date || c.start_date || null };
+  }
+  return { cad, upcoming, ended: false, doneToday, done: c.status === "done", due: c.due_date };
+};
+// Whether a task planned from this item counts it as done: recurring items are checked off one day at a time
+const sourceDone = (c) => itemState(c).cad === "once" ? itemState(c).done : itemState(c).doneToday;
+
+// Fields that check an item off (done) or take back today's check-off; null when there's nothing to change
 const itemDoneFields = (c, done) => {
   const iso = todayISO();
-  if (c.repeat_days) {
-    const log = c.done_log || [];
-    if (done) return { status: "todo", done_log: [...log, { date: iso, prev_due: c.due_date || null }], due_date: addDaysISO(iso, c.repeat_days), completed_at: new Date().toISOString() };
-    const last = log[log.length - 1];
-    if (!last) return null;
-    const rest = log.slice(0, -1);
-    return { done_log: rest, due_date: last.prev_due, completed_at: rest.length ? new Date(rest[rest.length - 1].date + "T12:00:00").toISOString() : null };
+  const cad = cadenceOf(c);
+  const log = c.done_log || [];
+  if (cad === "once") return { status: done ? "done" : "todo", completed_at: done ? new Date().toISOString() : null };
+  if (done) {
+    const entry = { date: iso, prev_due: c.due_date || null };
+    return cad === "weekly"
+      ? { done_log: [...log, entry], completed_at: new Date().toISOString() }
+      : { done_log: [...log, entry], due_date: addDaysISO(iso, c.repeat_days), completed_at: new Date().toISOString() };
   }
-  return { status: done ? "done" : "todo", completed_at: done ? new Date().toISOString() : null };
+  // Undo the latest check-off from today (or, for weekly, from this week)
+  const from = cad === "weekly" ? weekStartISO(iso) : iso;
+  let i = log.length - 1;
+  while (i >= 0 && log[i].date < from) i--;
+  if (i < 0 || log[i].date < from) return null;
+  const rest = [...log.slice(0, i), ...log.slice(i + 1)];
+  const fields = { done_log: rest, completed_at: rest.length ? new Date(rest[rest.length - 1].date + "T12:00:00").toISOString() : null };
+  if (cad === "every") fields.due_date = log[i].prev_due;
+  return fields;
 };
 const daysUntil = (iso) => Math.round((new Date(iso + "T00:00:00") - new Date(todayISO() + "T00:00:00")) / 86400000);
-const dueBadge = (due) => {
-  if (!due) return null;
-  const d = daysUntil(due);
-  if (d < 0)  return { text: d === -1 ? "1 day overdue" : `${-d} days overdue`, cls: "bg-rose-50 text-rose-700 ring-rose-200" };
-  if (d === 0) return { text: "Due today", cls: "bg-amber-50 text-amber-800 ring-amber-200" };
-  if (d === 1) return { text: "Due tomorrow", cls: "bg-amber-50 text-amber-800 ring-amber-200" };
-  if (d <= 7)  return { text: `Due in ${d} days`, cls: "bg-sky-50 text-sky-700 ring-sky-200" };
-  return { text: `Due ${isoToLabel(due)}`, cls: "bg-slate-50 text-slate-600 ring-slate-200" };
-};
 
 // A daily task can be planned from an area item or a goal milestone. It then carries
 // source = { type: "kanban", cardId } or { type: "milestone", goalId, milestoneId }.
@@ -100,7 +135,7 @@ const resolveSource = (source, kanbanCards, goals) => {
   if (!source) return null;
   if (source.type === "kanban") {
     const card = kanbanCards.find(c => c.id === source.cardId);
-    return card ? { kind: "kanban", title: card.title, done: itemState(card).done, goal: goals.find(g => g.id === card.goal_id) || null, area: card.area || null } : null;
+    return card ? { kind: "kanban", title: card.title, done: sourceDone(card), goal: goals.find(g => g.id === card.goal_id) || null, area: card.area || null } : null;
   }
   const goal = goals.find(g => g.id === source.goalId);
   const m = (goal?.milestones || []).find(x => x.id === source.milestoneId);
@@ -384,7 +419,7 @@ export default function App() {
 
     if (source.type === "kanban") {
       const card = kanbanCards.find(c => c.id === source.cardId);
-      const fields = card && itemState(card).done !== done ? itemDoneFields(card, done) : null;
+      const fields = card && sourceDone(card) !== done ? itemDoneFields(card, done) : null;
       if (fields) await updateKanbanCard(card.id, fields);
     } else {
       const goal = goals.find(g => g.id === source.goalId);
@@ -1820,12 +1855,13 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
 }
 
 // Area items due on a day. Today also carries everything overdue, including overdue items finished today so they can be unticked.
-const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => { const { due, done } = itemState(c); return due && (due === iso
+// Weekly items live on the Areas checklist rather than piling up here each week.
+const cardsDueOn = (kanbanCards, iso) => kanbanCards.filter(c => { const { due, done, cad } = itemState(c); return cad !== "weekly" && due && (due === iso
   || (iso === todayISO() && due < iso && (!done || stampISO(c.completed_at) === iso))); });
 
 // Items due in the six days after a day: a heads-up list, not part of that day's own tally.
 // Only for today onwards; an item finished early stays listed on the day it was finished so it can be unticked.
-const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => { const { due, done } = itemState(c); return due && due > iso && due <= addDaysISO(iso, 6)
+const cardsComingUp = (kanbanCards, iso) => iso < todayISO() ? [] : kanbanCards.filter(c => { const { due, done, cad } = itemState(c); return cad !== "weekly" && due && due > iso && due <= addDaysISO(iso, 6)
   && (!done || stampISO(c.completed_at) === iso); });
 const dueOf = (c) => itemState(c).due;
 
@@ -1859,7 +1895,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
 
   // Open milestones and area items that could be pulled onto this day: goal items under their goal, the rest under their area
   const asPick = (c) => ({ key: `c-${c.id}`, text: c.title, card: c, source: { type: "kanban", cardId: c.id } });
-  const openItems = kanbanCards.filter(c => !itemState(c).done);
+  const openItems = kanbanCards.filter(c => { const st = itemState(c); return !st.done && !st.upcoming; });
   const looseItems = openItems.filter(c => !goals.some(g => g.id === c.goal_id));
   const areaIds = [...new Set(looseItems.map(c => c.area?.id || null))];
   const pickable = [
@@ -2078,7 +2114,7 @@ function DailySection({ isMobile, dailyTasks, saveDailyTasks, habits, addHabit, 
                       <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
                         {overdue && <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-600 rounded font-medium">Overdue · {isoToLabel(due)}</span>}
                         {due > viewDate && <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-600 rounded">Due {due === addDaysISO(viewDate, 1) && isToday ? "tomorrow" : isoToLong(due)}</span>}
-                        {c.repeat_days && <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(c.repeat_days)}</span>}
+                        {repeatLabel(c) && <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(c)}</span>}
                         <GoalChip goal={goals.find(g => g.id === c.goal_id)} area={c.area}/>
                       </div>
                     </div>
@@ -2238,11 +2274,33 @@ const DEFAULT_AREAS = [
   { name: "Work",              color: "cyan"    },
 ];
 
-// Overdue first, then soonest due, then undated (oldest first)
+const dueBadge = (due, verb = "Due") => {
+  if (!due) return null;
+  const d = daysUntil(due);
+  const v = verb.toLowerCase();
+  if (d < 0)  return { text: d === -1 ? "1 day overdue" : `${-d} days overdue`, cls: "bg-rose-50 text-rose-700 ring-rose-200" };
+  if (d === 0) return { text: `${verb} today`, cls: "bg-amber-50 text-amber-800 ring-amber-200" };
+  if (d === 1) return { text: `${verb} tomorrow`, cls: "bg-amber-50 text-amber-800 ring-amber-200" };
+  if (d <= 7)  return { text: `${verb} in ${d} days`, cls: "bg-sky-50 text-sky-700 ring-sky-200" };
+  return { text: `${v === "due" ? "Due" : verb} ${isoToLabel(due)}`, cls: "bg-slate-50 text-slate-600 ring-slate-200" };
+};
+
+// "Dec 1 – Dec 20", "until Jan 15", "from Dec 1" for items that cover or recur over a period
+const periodLabel = (c) => {
+  if (cadenceOf(c) === "once") return c.start_date && c.due_date ? `${isoToLabel(c.start_date)} – ${isoToLabel(c.due_date)}` : null;
+  if (c.start_date && c.end_date) return c.start_date > todayISO() ? `${isoToLabel(c.start_date)} – ${isoToLabel(c.end_date)}` : `until ${isoToLabel(c.end_date)}`;
+  if (c.end_date) return `until ${isoToLabel(c.end_date)}`;
+  if (c.start_date && c.start_date > todayISO()) return `from ${isoToLabel(c.start_date)}`;
+  return null;
+};
+
+// Upcoming last, then overdue first, soonest due, undated (oldest first)
 const sortItems = (list) => [...list].sort((a, b) => {
-  const da = itemState(a).due, db = itemState(b).due;
-  if (da && db) return da.localeCompare(db);
-  if (da || db) return da ? -1 : 1;
+  const sa = itemState(a), sb = itemState(b);
+  if (sa.upcoming !== sb.upcoming) return sa.upcoming ? 1 : -1;
+  const da = sa.upcoming ? a.start_date : sa.due, db = sb.upcoming ? b.start_date : sb.due;
+  if (da && db && da !== db) return da.localeCompare(db);
+  if (!!da !== !!db) return da ? -1 : 1;
   return (a.created_at || "").localeCompare(b.created_at || "");
 });
 
@@ -2273,118 +2331,214 @@ function PlanMenu({ planned, onPlan, isMobile }) {
   );
 }
 
-function ItemRow({ item, isMobile, goals, plannedToday, onToggle, onPlan, onEdit }) {
-  const { done, due } = itemState(item);
-  const badge = !done && dueBadge(due);
+function ItemRow({ item, isMobile, goals, plannedToday, onCheck, onUncheck, onPlan, onEdit }) {
+  const st = itemState(item);
+  const { done, due, cad } = st;
   const goal = goals.find(g => g.id === item.goal_id);
-  const last = item.repeat_days ? lastDoneOf(item) : null;
+  const last = cad !== "once" ? lastDoneOf(item) : null;
+  const period = periodLabel(item);
+  const isSpan = cad === "once" && item.start_date && item.due_date;
+  let badge = null;
+  if (st.upcoming) badge = { text: `Starts ${isoToLabel(item.start_date)}`, cls: "bg-slate-50 text-slate-600 ring-slate-200" };
+  else if (st.ended) badge = { text: "Finished", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" };
+  else if (cad === "weekly") badge = done ? { text: "Done this week", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" }
+    : st.target > 1 ? { text: `${st.count} of ${st.target} this week`, cls: st.count ? "bg-sky-50 text-sky-700 ring-sky-200" : "bg-slate-50 text-slate-600 ring-slate-200" } : null;
+  else if (!done) badge = dueBadge(due, isSpan ? "Ends" : "Due");
+  // A weekly item done some of its times shows its tally; tapping adds one, and once the week's done tapping takes the last one back
+  const partial = cad === "weekly" && st.target > 1 && st.count > 0 && !done;
+  // Recurring items take one check-off per day
+  const checkable = !st.upcoming && !st.ended && !(cad === "weekly" && !done && st.doneToday);
   return (
-    <div className={`group flex items-center gap-2.5 px-3 sm:px-4 last:rounded-b-2xl ${isMobile ? "py-3" : "py-2.5"} ${done ? "bg-slate-50/60" : "hover:bg-slate-50/70"}`}>
-      <button onClick={onToggle} aria-label={done ? "Mark not done" : "Mark done"}
-        className={`${isMobile ? "w-8 h-8" : "w-5 h-5"} rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-all touch-manipulation ${done ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-300 text-transparent hover:border-emerald-500 hover:text-emerald-500"}`}>
-        <Check size={isMobile ? 15 : 11} strokeWidth={3}/>
+    <div className={`group flex items-center gap-2.5 px-3 sm:px-4 last:rounded-b-2xl ${isMobile ? "py-3" : "py-2.5"} ${done || st.upcoming ? "bg-slate-50/60" : "hover:bg-slate-50/70"}`}>
+      <button onClick={done ? onUncheck : onCheck} disabled={!checkable && !done} aria-label={done ? "Undo" : "Check off"} title={partial && st.doneToday ? "Checked off today" : undefined}
+        className={`${isMobile ? "w-8 h-8" : "w-5 h-5"} rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-all touch-manipulation disabled:cursor-default ${partial && st.doneToday ? "bg-sky-50" : ""} ${done ? "bg-emerald-500 border-emerald-500 text-white" : partial ? "border-sky-400 text-sky-600" : "border-slate-300 text-transparent hover:border-emerald-500 hover:text-emerald-500"}`}>
+        {partial ? <span className={`${isMobile ? "text-xs" : "text-[10px]"} font-bold`}>{st.count}</span> : <Check size={isMobile ? 15 : 11} strokeWidth={3}/>}
       </button>
       <button onClick={onEdit} className="flex-1 min-w-0 text-left touch-manipulation">
-        <span className={`block ${isMobile ? "text-[15px]" : "text-sm"} ${done ? "line-through text-slate-400" : "text-slate-800 font-medium"} truncate`}>{item.title}</span>
-        <span className="flex flex-wrap items-center gap-1.5 mt-0.5">
+        <span className={`block ${isMobile ? "text-[15px]" : "text-sm"} ${done && !(cad === "weekly" && !st.ended) ? "line-through text-slate-400" : done ? "text-slate-500" : "text-slate-800 font-medium"} truncate`}>{item.title}</span>
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 mt-0.5">
           {badge && <span className={`text-[11px] px-1.5 py-0.5 rounded-md ring-1 ring-inset font-medium ${badge.cls}`}>{badge.text}</span>}
-          {done && !item.repeat_days && item.completed_at && <span className="text-[11px] text-slate-400">Done {isoToLabel(stampISO(item.completed_at))}</span>}
-          {item.repeat_days && <span className="text-[11px] text-slate-500 inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(item.repeat_days)}</span>}
-          {last && <span className="text-[11px] text-slate-400">· last done {last.date === todayISO() ? "today" : isoToLabel(last.date)}</span>}
+          {cad === "once" && done && item.completed_at && <span className="text-[11px] text-slate-400">Done {isoToLabel(stampISO(item.completed_at))}</span>}
+          {cad === "every" && <span className="text-[11px] text-slate-500 inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(item)}</span>}
+          {cad === "weekly" && !isPermanent(item) && <span className="text-[11px] text-slate-500 inline-flex items-center gap-1"><Repeat size={11}/>{repeatLabel(item)}</span>}
+          {period && !st.upcoming && <span className="text-[11px] text-slate-500">{period}</span>}
+          {st.upcoming && period && cad !== "once" && <span className="text-[11px] text-slate-500">{period}</span>}
+          {cad === "every" && last && <span className="text-[11px] text-slate-400">· last done {last.date === todayISO() ? "today" : isoToLabel(last.date)}</span>}
           {goal && <GoalChip goal={goal}/>}
           {item.notes && <span className="text-[11px] text-slate-400 truncate max-w-[14rem]">· {item.notes}</span>}
         </span>
       </button>
-      {!done && <PlanMenu planned={plannedToday} onPlan={onPlan} isMobile={isMobile}/>}
+      {partial && <button onClick={onUncheck} className="p-1.5 text-slate-400 hover:text-slate-700 text-xs font-semibold flex-shrink-0" aria-label="Take one back" title="Take one back">−1</button>}
+      {!done && !st.upcoming && !st.ended && <PlanMenu planned={plannedToday} onPlan={onPlan} isMobile={isMobile}/>}
     </div>
   );
 }
 
-function ItemEditor({ item, areas, goals, defaultAreaId, onSave, onDelete, onClose }) {
+const ITEM_KINDS = [
+  { id: "recurring", label: "Recurring",       hint: "Weekly or every few days, ongoing or for a set stretch" },
+  { id: "period",    label: "Covers a period", hint: "Something that runs from one date to another" },
+  { id: "once",      label: "One-off",         hint: "Do it once, optionally by a date" },
+];
+
+function ItemEditor({ item, areas, goals, defaults = {}, onSave, onDelete, onClose }) {
   const isNew = !item;
-  const [title, setTitle]   = useState(item?.title || "");
-  const [areaId, setAreaId] = useState(item ? item.area_id || "" : defaultAreaId || "");
-  const [due, setDue]       = useState(item?.due_date || "");
-  const preset = !item?.repeat_days ? "" : REPEAT_OPTIONS.some(o => o[0] === item.repeat_days) ? String(item.repeat_days) : "custom";
-  const [repeat, setRepeat] = useState(preset);
-  const [customDays, setCustomDays] = useState(item?.repeat_days && preset === "custom" ? String(item.repeat_days) : "");
-  const [goalId, setGoalId] = useState(item?.goal_id || "");
-  const [notes, setNotes]   = useState(item?.notes || "");
+  const src = item || defaults;
+  const cad0 = cadenceOf(src);
+  const today = todayISO();
+  const [title, setTitle]   = useState(src.title || "");
+  const [areaId, setAreaId] = useState(src.area_id || "");
+  const [kind, setKind]     = useState(cad0 !== "once" ? "recurring" : src.start_date ? "period" : "once");
+  const [freq, setFreq]     = useState(cad0 === "every" ? (REPEAT_OPTIONS.some(o => o[0] === src.repeat_days) ? String(src.repeat_days) : "custom") : "weekly");
+  const [perWeek, setPerWeek] = useState(src.per_week || 1);
+  const [customDays, setCustomDays] = useState(src.repeat_days && !REPEAT_OPTIONS.some(o => o[0] === src.repeat_days) ? String(src.repeat_days) : "");
+  const [bounded, setBounded] = useState(!!(src.end_date || (cad0 !== "once" && src.start_date)));
+  const [start, setStart]   = useState(src.start_date || "");
+  const [end, setEnd]       = useState(cad0 === "once" && src.start_date ? src.due_date || "" : src.end_date || "");
+  const [due, setDue]       = useState(src.due_date || "");
+  const [goalId, setGoalId] = useState(src.goal_id || "");
+  const [notes, setNotes]   = useState(src.notes || "");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const repeatDays = repeat === "custom" ? (parseInt(customDays, 10) > 0 ? parseInt(customDays, 10) : null) : repeat ? Number(repeat) : null;
   const log = item?.done_log || [];
+  const everyDays = freq === "custom" ? (parseInt(customDays, 10) > 0 ? parseInt(customDays, 10) : null) : freq === "weekly" ? null : Number(freq);
+
+  const problem = !title.trim() ? "Give it a name."
+    : kind === "period" && (!start || !end) ? "Pick a start and end date."
+    : kind === "period" && end < start ? "The end date is before the start."
+    : kind === "recurring" && freq === "custom" && !everyDays ? "Enter how many days between."
+    : kind === "recurring" && bounded && !end ? "Pick when it stops, or make it ongoing."
+    : kind === "recurring" && bounded && start && end < start ? "The end date is before the start."
+    : null;
 
   const save = () => {
-    if (!title.trim()) return;
-    const fields = { title: title.trim(), area_id: areaId || null, due_date: due || null, repeat_days: repeatDays, goal_id: goalId || null, notes: notes.trim() };
-    // A repeating item can't sit in "done"; turning repetition on reopens it
-    if (repeatDays && item?.status === "done") { fields.status = "todo"; fields.completed_at = null; }
+    if (problem) return;
+    const fields = { title: title.trim(), area_id: areaId || null, goal_id: goalId || null, notes: notes.trim() };
+    if (kind === "once") Object.assign(fields, { cadence: "once", repeat_days: null, start_date: null, end_date: null, due_date: due || null });
+    if (kind === "period") Object.assign(fields, { cadence: "once", repeat_days: null, start_date: start, end_date: null, due_date: end });
+    if (kind === "recurring") {
+      const s = bounded ? start || today : null;
+      Object.assign(fields, { start_date: bounded ? s : null, end_date: bounded ? end : null });
+      if (freq === "weekly") Object.assign(fields, { cadence: "weekly", per_week: perWeek, repeat_days: null, due_date: null });
+      else {
+        // Keep the next due date if it still makes sense, otherwise start the cycle at the start date (or today)
+        const keep = cad0 === "every" && src.due_date && (!s || src.due_date >= s) ? src.due_date : null;
+        Object.assign(fields, { cadence: "every", repeat_days: everyDays, due_date: due || keep || s || today });
+      }
+      // A recurring item never sits in "done"
+      if (item?.status === "done") { fields.status = "todo"; fields.completed_at = null; }
+    } else if (item && cad0 !== "once") { fields.status = "todo"; fields.done_log = []; }
     onSave(fields);
   };
+
   const field = "w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:border-blue-400";
+  const label = "block text-xs font-medium text-slate-600 mb-1";
+  const chip = (active) => `px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${active ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`;
   return (
-    <Sheet title={isNew ? "New item" : "Edit item"} onClose={onClose} closeOnBackdrop={false}>
+    <Sheet title={isNew ? "New task" : "Edit task"} onClose={onClose} closeOnBackdrop={false}>
       <div className="space-y-4">
         <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && save()} placeholder="What do you need to stay on top of?" className={field} autoFocus={isNew}/>
+
+        <div>
+          <span className={label}>Kind</span>
+          <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+            {ITEM_KINDS.map(k => <button key={k.id} onClick={() => setKind(k.id)} className={chip(kind === k.id)}>{k.label}</button>)}
+          </div>
+          <p className="text-xs text-slate-500 mt-1.5">{ITEM_KINDS.find(k => k.id === kind).hint}</p>
+        </div>
+
+        {kind === "recurring" && (
+          <div className="rounded-xl border border-slate-200 p-3 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className={label}>How often</span>
+                <select value={freq} onChange={e => setFreq(e.target.value)} className={field}>
+                  <option value="weekly">Every week</option>
+                  {REPEAT_OPTIONS.map(([d, l]) => <option key={d} value={d}>{l}</option>)}
+                  <option value="custom">Every … days</option>
+                </select>
+              </label>
+              {freq === "weekly" ? (
+                <label className="block">
+                  <span className={label}>Times a week</span>
+                  <select value={perWeek} onChange={e => setPerWeek(Number(e.target.value))} className={field}>
+                    {[1,2,3,4,5,6,7].map(n => <option key={n} value={n}>{n === 1 ? "Once" : `${n} times`}</option>)}
+                  </select>
+                </label>
+              ) : freq === "custom" ? (
+                <label className="block">
+                  <span className={label}>Days between</span>
+                  <input type="number" min="1" inputMode="numeric" value={customDays} onChange={e => setCustomDays(e.target.value)} className={field}/>
+                </label>
+              ) : (
+                <label className="block">
+                  <span className={label}>Next due</span>
+                  <input type="date" value={due} onChange={e => setDue(e.target.value)} className={field}/>
+                </label>
+              )}
+            </div>
+            <div>
+              <span className={label}>For how long</span>
+              <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl">
+                <button onClick={() => setBounded(false)} className={chip(!bounded)}>Ongoing</button>
+                <button onClick={() => setBounded(true)} className={chip(bounded)}>Set period</button>
+              </div>
+            </div>
+            {bounded && (
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block"><span className={label}>Starts</span><input type="date" value={start} placeholder={today} onChange={e => setStart(e.target.value)} className={field}/></label>
+                <label className="block"><span className={label}>Ends</span><input type="date" value={end} onChange={e => setEnd(e.target.value)} className={field}/></label>
+              </div>
+            )}
+            <p className="text-xs text-slate-500">
+              {freq === "weekly"
+                ? `Resets every Monday${perWeek > 1 ? `; done for the week after ${perWeek} check-offs` : ""}.`
+                : `Checking it off sets the next due date ${everyDays || "N"} days out.`}
+              {bounded ? " Stops after the end date." : ""}
+            </p>
+          </div>
+        )}
+
+        {kind === "period" && (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block"><span className={label}>Starts</span><input type="date" value={start} onChange={e => setStart(e.target.value)} className={field}/></label>
+            <label className="block"><span className={label}>Ends</span><input type="date" value={end} onChange={e => setEnd(e.target.value)} className={field}/></label>
+          </div>
+        )}
+
+        {kind === "once" && (
+          <label className="block"><span className={label}>Due (optional)</span><input type="date" value={due} onChange={e => setDue(e.target.value)} className={field}/></label>
+        )}
+
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
-            <span className="block text-xs font-medium text-slate-600 mb-1">Area</span>
+            <span className={label}>Area</span>
             <select value={areaId} onChange={e => setAreaId(e.target.value)} className={field}>
               <option value="">Unsorted</option>
               {areas.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           </label>
           <label className="block">
-            <span className="block text-xs font-medium text-slate-600 mb-1">{repeatDays ? "Next due" : "Due"}</span>
-            <input type="date" value={due} onChange={e => setDue(e.target.value)} className={field}/>
-          </label>
-          <label className="block">
-            <span className="block text-xs font-medium text-slate-600 mb-1">Repeats</span>
-            <select value={repeat} onChange={e => setRepeat(e.target.value)} className={field}>
-              <option value="">Doesn't repeat</option>
-              {REPEAT_OPTIONS.map(([d, label]) => <option key={d} value={d}>{label}</option>)}
-              <option value="custom">Custom…</option>
-            </select>
-          </label>
-          {repeat === "custom" ? (
-            <label className="block">
-              <span className="block text-xs font-medium text-slate-600 mb-1">Every how many days</span>
-              <input type="number" min="1" inputMode="numeric" value={customDays} onChange={e => setCustomDays(e.target.value)} className={field}/>
-            </label>
-          ) : goals.length > 0 ? (
-            <label className="block">
-              <span className="block text-xs font-medium text-slate-600 mb-1">Goal</span>
-              <select value={goalId} onChange={e => setGoalId(e.target.value)} className={field}>
-                <option value="">No goal</option>
-                {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
-              </select>
-            </label>
-          ) : <div/>}
-        </div>
-        {repeat === "custom" && goals.length > 0 && (
-          <label className="block">
-            <span className="block text-xs font-medium text-slate-600 mb-1">Goal</span>
+            <span className={label}>Goal</span>
             <select value={goalId} onChange={e => setGoalId(e.target.value)} className={field}>
               <option value="">No goal</option>
               {goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}
             </select>
           </label>
-        )}
-        {repeatDays && <p className="text-xs text-slate-500 -mt-1">Checking it off logs today and sets the next due date {repeatDays} days out.</p>}
+        </div>
         <label className="block">
-          <span className="block text-xs font-medium text-slate-600 mb-1">Notes</span>
+          <span className={label}>Notes</span>
           <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="Phone numbers, account details, what to bring…" className={`${field} resize-none`}/>
         </label>
         {log.length > 0 && (
           <div>
-            <p className="text-xs font-medium text-slate-600 mb-1">Done on</p>
+            <p className={label}>Checked off</p>
             <div className="flex flex-wrap gap-1.5">
-              {[...log].reverse().slice(0, 12).map((e, i) => <span key={i} className="text-xs px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700">{isoToLabel(e.date)}</span>)}
+              {[...log].reverse().slice(0, 14).map((e, i) => <span key={i} className="text-xs px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700">{isoToLabel(e.date)}</span>)}
             </div>
           </div>
         )}
+        {problem && title.trim() && <p className="text-xs text-rose-600">{problem}</p>}
         <div className="flex gap-2 pt-1">
-          <button onClick={save} disabled={!title.trim()} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-40">{isNew ? "Add item" : "Save"}</button>
+          <button onClick={save} disabled={!!problem} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-40">{isNew ? "Add task" : "Save"}</button>
           {!isNew && (confirmDelete
             ? <button onClick={onDelete} className="px-4 py-2.5 bg-rose-600 text-white rounded-lg text-sm font-semibold">Delete it</button>
             : <button onClick={() => setConfirmDelete(true)} className="px-3 py-2.5 text-rose-600 hover:bg-rose-50 rounded-lg text-sm font-medium flex items-center gap-1"><Trash2 size={15}/> Delete</button>)}
@@ -2419,7 +2573,7 @@ function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, 
                 <input defaultValue={a.name} onBlur={e => { const v = e.target.value.trim(); if (v && v !== a.name) updateArea(a.id, { name: v }); else e.target.value = a.name; }}
                   onKeyDown={e => e.key === "Enter" && e.currentTarget.blur()}
                   className="flex-1 min-w-0 px-2 py-1.5 border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg text-sm font-medium text-slate-800 focus:outline-none"/>
-                <span className="text-xs text-slate-400 flex-shrink-0">{count} item{count === 1 ? "" : "s"}</span>
+                <span className="text-xs text-slate-400 flex-shrink-0">{count} task{count === 1 ? "" : "s"}</span>
                 {confirmDelete === a.id ? (
                   <button onClick={() => { deleteArea(a.id); setConfirmDelete(null); }} className="text-xs px-2 py-1 bg-rose-600 text-white rounded-md font-semibold flex-shrink-0">Remove</button>
                 ) : (
@@ -2432,7 +2586,7 @@ function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, 
                     className={`w-5 h-5 rounded-full transition-transform ${a.color === c.id ? "ring-2 ring-offset-2 ring-slate-700 scale-110" : "hover:scale-110"}`} style={{ background: c.hex }}/>
                 ))}
               </div>
-              {confirmDelete === a.id && <p className="text-xs text-rose-600 mt-2 ml-7">Its {count} item{count === 1 ? "" : "s"} will move to Unsorted. <button onClick={() => setConfirmDelete(null)} className="underline">Keep it</button></p>}
+              {confirmDelete === a.id && <p className="text-xs text-rose-600 mt-2 ml-7">Its {count} task{count === 1 ? "" : "s"} will move to Unsorted. <button onClick={() => setConfirmDelete(null)} className="underline">Keep it</button></p>}
             </div>
           );
         })}
@@ -2445,14 +2599,28 @@ function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, 
   );
 }
 
+function QuickAdd({ placeholder, onAdd, onMore }) {
+  const [text, setText] = useState("");
+  const add = () => { const t = text.trim(); if (!t) return; setText(""); onAdd(t); };
+  return (
+    <div className="flex items-center gap-2 px-4 py-1.5">
+      <Plus size={14} className="text-slate-400 flex-shrink-0"/>
+      <input value={text} onChange={e => setText(e.target.value)} onKeyDown={e => e.key === "Enter" && add()} placeholder={placeholder} className="flex-1 min-w-0 py-1.5 bg-transparent text-sm focus:outline-none"/>
+      {text.trim()
+        ? <button onClick={add} className="text-sm font-medium text-blue-700 px-2">Add</button>
+        : onMore && <button onClick={onMore} className="text-xs font-medium text-slate-400 hover:text-blue-700 px-2 whitespace-nowrap">More options</button>}
+    </div>
+  );
+}
+
 function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, deleteArea, goals, dailyTasks, links }) {
   const [filter, setFilter]       = useState("all"); // all | attention
   const [showDone, setShowDone]   = useState(false);
   const [collapsed, setCollapsed] = useState(() => { try { return JSON.parse(localStorage.getItem("mindfit.areas.collapsed") || "[]"); } catch { return []; } });
-  const [quick, setQuick]         = useState({});
-  const [editing, setEditing]     = useState(null); // { item } or { areaId } for a new one
+  const [editing, setEditing]     = useState(null); // { item } or { defaults } for a new one
   const [managing, setManaging]   = useState(false);
   const today = todayISO();
+  const weekStart = weekStartISO(today);
 
   const toggleCollapsed = (key) => setCollapsed(prev => {
     const next = prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key];
@@ -2460,55 +2628,80 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
     return next;
   });
 
-  const open = items.filter(c => !itemState(c).done);
-  const overdue = open.filter(c => { const d = itemState(c).due; return d && d < today; });
-  const dueSoon = open.filter(c => { const d = itemState(c).due; return d && d >= today && d <= addDaysISO(today, 7); });
-  const needsAttention = (c) => { const d = itemState(c).due; return !itemState(c).done && d && d <= addDaysISO(today, 14); };
+  const states = new Map(items.map(c => [c.id, itemState(c)]));
+  const st = (c) => states.get(c.id);
+  const weeklyAll = items.filter(c => isPermanent(c));
+  const weeklyDone = weeklyAll.filter(c => st(c).done).length;
+  const others = items.filter(c => !isPermanent(c));
+  const overdue = others.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due < today; });
+  const dueSoon = others.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due >= today && s.due <= addDaysISO(today, 7); });
+  const needsAttention = (c) => {
+    const s = st(c);
+    if (s.done || s.upcoming) return false;
+    if (s.cad === "weekly") return true;
+    return !!s.due && s.due <= addDaysISO(today, 7);
+  };
   const plannedToday = (c) => isPlannedOn(dailyTasks, today, { type: "kanban", cardId: c.id });
+  const visible = (c) => {
+    const s = st(c);
+    const finished = (s.cad === "once" && s.done) || s.ended;
+    if (finished) return showDone;
+    return filter === "all" || needsAttention(c);
+  };
 
-  // Unsorted leads so new things get filed
   const groups = [
     { key: "unsorted", area: null, items: items.filter(c => !c.area_id || !areas.some(a => a.id === c.area_id)) },
     ...areas.map(a => ({ key: a.id, area: a, items: items.filter(c => c.area_id === a.id) })),
   ].filter(g => g.area || g.items.length > 0);
 
-  const quickAdd = async (areaId) => {
-    const key = areaId || "unsorted";
-    const title = (quick[key] || "").trim();
-    if (!title) return;
-    setQuick(q => ({ ...q, [key]: "" }));
-    await addItem({ title, status: "todo", area_id: areaId || null });
-  };
-
   const saveEditor = async (fields) => {
     if (editing.item) await updateItem(editing.item.id, fields);
-    else await addItem({ ...fields, status: "todo" });
+    else await addItem({ status: "todo", ...fields });
     setEditing(null);
   };
+  const check = (c) => links.setSourceDone({ type: "kanban", cardId: c.id }, true);
+  // Takes back today's check-off (for weekly items, the latest one this week)
+  const uncheck = async (c) => {
+    if (sourceDone(c)) return links.setSourceDone({ type: "kanban", cardId: c.id }, false);
+    const fields = itemDoneFields(c, false);
+    if (fields) await updateItem(c.id, fields);
+  };
+  const row = (c) => (
+    <ItemRow key={c.id} item={c} isMobile={isMobile} goals={goals} plannedToday={plannedToday(c)}
+      onCheck={() => check(c)} onUncheck={() => uncheck(c)}
+      onPlan={(iso) => links.planSource({ type: "kanban", cardId: c.id }, c.title, iso)}
+      onEdit={() => setEditing({ item: c })}/>
+  );
 
-  const stat = (label, value, cls, onClick, active) => (
-    <button onClick={onClick} className={`flex-1 text-left rounded-xl px-3 py-2.5 ring-1 ring-inset transition-colors ${active ? "ring-blue-300 bg-blue-50" : "ring-slate-200 bg-white hover:bg-slate-50"}`}>
+  const stat = (label, value, cls, active, onClick) => (
+    <button onClick={onClick} className={`flex-1 min-w-0 text-left rounded-xl px-3 py-2.5 ring-1 ring-inset transition-colors ${active ? "ring-blue-300 bg-blue-50" : "ring-slate-200 bg-white hover:bg-slate-50"}`}>
       <span className={`block text-2xl font-bold leading-none ${cls}`}>{value}</span>
-      <span className="block text-xs text-slate-500 mt-1">{label}</span>
+      <span className="block text-xs text-slate-500 mt-1 truncate">{label}</span>
     </button>
+  );
+  const subhead = (text, right) => (
+    <div className="flex items-center justify-between px-4 pt-3 pb-1">
+      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide">{text}</span>
+      {right && <span className="text-[11px] text-slate-400">{right}</span>}
+    </div>
   );
 
   return (
     <div className="space-y-4">
       <div className="flex gap-2">
-        {stat("Overdue", overdue.length, overdue.length ? "text-rose-600" : "text-slate-300", () => setFilter(f => f === "attention" ? "all" : "attention"), filter === "attention")}
-        {stat("Due this week", dueSoon.length, dueSoon.length ? "text-amber-600" : "text-slate-300", () => setFilter(f => f === "attention" ? "all" : "attention"), filter === "attention")}
-        {stat("Tracking", open.length, "text-slate-800", () => setFilter("all"), filter === "all")}
+        {stat("This week", `${weeklyDone}/${weeklyAll.length}`, weeklyAll.length && weeklyDone === weeklyAll.length ? "text-emerald-600" : "text-slate-800", false, () => setFilter("attention"))}
+        {stat("Overdue", overdue.length, overdue.length ? "text-rose-600" : "text-slate-300", false, () => setFilter("attention"))}
+        {stat("Due in 7 days", dueSoon.length, dueSoon.length ? "text-amber-600" : "text-slate-300", false, () => setFilter("attention"))}
       </div>
 
       <div className="flex items-center gap-2">
         <div className="flex gap-1 bg-slate-100 p-1 rounded-lg text-sm">
-          {[["all", "Everything"], ["attention", "Needs attention"]].map(([id, label]) => (
+          {[["all", "Everything"], ["attention", "To do now"]].map(([id, label]) => (
             <button key={id} onClick={() => setFilter(id)} className={`px-3 py-1 rounded-md font-medium transition-all ${filter === id ? "bg-white shadow-sm text-slate-900" : "text-slate-500 hover:text-slate-700"}`}>{label}</button>
           ))}
         </div>
         <label className="ml-auto flex items-center gap-1.5 text-sm text-slate-500 cursor-pointer select-none">
-          <input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)} className="rounded accent-blue-600"/> Done
+          <input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)} className="rounded accent-blue-600"/> Finished
         </label>
         <button onClick={() => setManaging(true)} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg" aria-label="Edit areas" title="Edit areas"><Settings size={16}/></button>
       </div>
@@ -2522,52 +2715,51 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
 
       {groups.map(({ key, area, items: list }) => {
         const hex = area ? goalHex(area) : "#94a3b8";
-        const openList = list.filter(c => !itemState(c).done);
-        const shown = sortItems(list.filter(c => {
-          if (itemState(c).done && !c.repeat_days) return showDone;
-          return filter === "all" || needsAttention(c);
-        }));
-        const late = openList.filter(c => { const d = itemState(c).due; return d && d < today; }).length;
+        const weekly = list.filter(isPermanent);
+        const rest = list.filter(c => !isPermanent(c));
+        const weeklyShown = weekly.filter(visible);
+        const restShown = sortItems(rest.filter(visible));
+        const wDone = weekly.filter(c => st(c).done).length;
+        const late = rest.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due < today; }).length;
         const isCollapsed = collapsed.includes(key);
-        if (filter === "attention" && shown.length === 0) return null;
+        if (filter === "attention" && weeklyShown.length + restShown.length === 0) return null;
+        const addWeekly = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "weekly", per_week: 1 });
+        const addOther  = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "once" });
         return (
           <section key={key} className="bg-white rounded-2xl border border-slate-200 shadow-sm">
-            <div className={`flex items-center gap-2.5 px-4 py-3 rounded-t-2xl ${isCollapsed ? "rounded-b-2xl" : ""} ${isCollapsed ? "" : "border-b border-slate-100"}`} style={{ boxShadow: `inset 3px 0 0 ${hex}` }}>
+            <div className={`flex items-center gap-2.5 px-4 py-3 rounded-t-2xl ${isCollapsed ? "rounded-b-2xl" : "border-b border-slate-100"}`} style={{ boxShadow: `inset 3px 0 0 ${hex}` }}>
               <button onClick={() => toggleCollapsed(key)} className="flex-1 min-w-0 flex items-center gap-2.5 text-left" aria-expanded={!isCollapsed}>
                 <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: hex }}/>
                 <h3 className="font-semibold text-slate-900 truncate">{area?.name || "Unsorted"}</h3>
-                {!area && <span className="text-xs text-slate-400 hidden sm:inline">tap an item to give it an area</span>}
-                <span className="text-xs text-slate-400 flex-shrink-0">{openList.length}</span>
+                {weekly.length > 0 && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded-md flex-shrink-0 ${wDone === weekly.length ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{wDone}/{weekly.length} this week</span>}
                 {late > 0 && <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded-md bg-rose-50 text-rose-700 flex-shrink-0">{late} overdue</span>}
-                {isCollapsed ? <ChevronDown size={16} className="text-slate-400 flex-shrink-0"/> : <ChevronUp size={16} className="text-slate-400 flex-shrink-0"/>}
+                {isCollapsed ? <ChevronDown size={16} className="text-slate-400 flex-shrink-0 ml-auto"/> : <ChevronUp size={16} className="text-slate-400 flex-shrink-0 ml-auto"/>}
               </button>
-              <button onClick={() => setEditing({ areaId: area?.id || null })} className="p-1.5 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg" aria-label={`Add to ${area?.name || "Unsorted"}`}><Plus size={16}/></button>
+              <button onClick={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "once" } })} className="p-1.5 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg" aria-label={`Add to ${area?.name || "Unsorted"}`}><Plus size={16}/></button>
             </div>
-            {!isCollapsed && <>
-              <div className="divide-y divide-slate-100">
-                {shown.map(c => (
-                  <ItemRow key={c.id} item={c} isMobile={isMobile} goals={goals} plannedToday={plannedToday(c)}
-                    onToggle={() => links.setSourceDone({ type: "kanban", cardId: c.id }, !itemState(c).done)}
-                    onPlan={(iso) => links.planSource({ type: "kanban", cardId: c.id }, c.title, iso)}
-                    onEdit={() => setEditing({ item: c })}/>
-                ))}
-                {shown.length === 0 && list.length > 0 && <p className="px-4 py-3 text-sm text-slate-400">All caught up here.</p>}
-              </div>
-              {area && filter === "all" && (
-                <div className={`flex items-center gap-2 px-4 py-2 bg-slate-50/50 rounded-b-2xl ${shown.length ? "border-t border-slate-100" : ""}`}>
-                  <Plus size={14} className="text-slate-400 flex-shrink-0"/>
-                  <input value={quick[key] || ""} onChange={e => setQuick(q => ({ ...q, [key]: e.target.value }))} onKeyDown={e => e.key === "Enter" && quickAdd(area.id)}
-                    placeholder={`Add to ${area.name}`} className="flex-1 min-w-0 py-1.5 bg-transparent text-sm focus:outline-none"/>
-                  {(quick[key] || "").trim() && <button onClick={() => quickAdd(area.id)} className="text-sm font-medium text-blue-700 px-2">Add</button>}
+            {!isCollapsed && <div className="pb-1">
+              {(weekly.length > 0 || (area && filter === "all")) && <>
+                {subhead("Every week", `resets Mon · week of ${isoToLabel(weekStart)}`)}
+                <div className="divide-y divide-slate-100">{weeklyShown.map(row)}</div>
+                {weekly.length > 0 && weeklyShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">All done this week.</p>}
+                {area && filter === "all" && <QuickAdd placeholder="Add a weekly task" onAdd={addWeekly}/>}
+              </>}
+              {(rest.length > 0 || (area && filter === "all")) && <>
+                <div className={weekly.length > 0 || (area && filter === "all") ? "border-t border-slate-100 mt-1" : ""}>
+                  {subhead("Temporary & one-off")}
                 </div>
-              )}
-            </>}
+                <div className="divide-y divide-slate-100">{restShown.map(row)}</div>
+                {rest.length > 0 && restShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">Nothing due right now.</p>}
+                {filter === "all" && <QuickAdd placeholder="Add a one-off task" onAdd={addOther}
+                  onMore={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "every", repeat_days: 3, end_date: addDaysISO(today, 14), start_date: today } })}/>}
+              </>}
+            </div>}
           </section>
         );
       })}
 
       {editing && (
-        <ItemEditor item={editing.item} defaultAreaId={editing.areaId} areas={areas} goals={goals}
+        <ItemEditor item={editing.item} defaults={editing.defaults} areas={areas} goals={goals}
           onSave={saveEditor} onClose={() => setEditing(null)}
           onDelete={async () => { await deleteItem(editing.item.id); setEditing(null); }}/>
       )}
