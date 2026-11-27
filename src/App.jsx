@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { TrendingUp, Dumbbell, Plus, BarChart3, Edit2, Trash2, SmilePlus, Lightbulb, ChevronLeft, ChevronRight, X, Check, Heart, Target, CheckSquare, Calendar, Flag, ChevronDown, ChevronUp, LogOut, Smile, Zap, Moon, Activity, Settings, Repeat, Flame, History, GripVertical, CalendarPlus, LayoutList, ArrowUp, ArrowDown, Bot, Copy, Inbox } from "lucide-react";
 import { supabase } from "./supabase.js";
 
@@ -359,16 +359,28 @@ export default function App() {
     await supabase.from("life_areas").update(updates).eq("id", id).eq("user_id", uid());
   };
 
-  // Swaps an area with its neighbour; positions are renumbered so ties can't stick
-  const moveArea = async (id, delta) => {
-    const order = [...areas];
-    const i = order.findIndex(a => a.id === id), j = i + delta;
-    if (i < 0 || j < 0 || j >= order.length) return;
-    [order[i], order[j]] = [order[j], order[i]];
-    const next = order.map((a, k) => ({ ...a, position: k }));
+  // Puts the areas in the given order; positions are renumbered so ties can't stick
+  const reorderAreas = async (ids) => {
+    const next = ids.map(id => areas.find(a => a.id === id)).filter(Boolean).map((a, k) => ({ ...a, position: k }));
+    if (next.length !== areas.length) return;
     setAreas(next);
-    await Promise.all(next.filter((a, k) => areas.find(x => x.id === a.id)?.position !== k)
+    await Promise.all(next.filter(a => areas.find(x => x.id === a.id)?.position !== a.position)
       .map(a => supabase.from("life_areas").update({ position: a.position }).eq("id", a.id).eq("user_id", uid())));
+  };
+  const moveArea = (id, delta) => {
+    const ids = areas.map(a => a.id);
+    const i = ids.indexOf(id), j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    return reorderAreas(ids);
+  };
+
+  // Saves a drag-and-drop: each update is { id, position, area_id? }
+  const reorderItems = async (updates) => {
+    if (!updates.length) return;
+    const byId = new Map(updates.map(u => [u.id, u]));
+    setKanbanCards(prev => prev.map(c => byId.has(c.id) ? { ...c, ...byId.get(c.id) } : c));
+    await Promise.all(updates.map(({ id, ...fields }) => supabase.from("tasks_kanban").update(fields).eq("id", id).eq("user_id", uid())));
   };
 
   // Its items are kept and become unsorted
@@ -539,6 +551,7 @@ export default function App() {
             kanbanCards={items}
             addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}
             areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
+            reorderAreas={reorderAreas} reorderItems={reorderItems}
             goals={goals}
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
             habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
@@ -1837,7 +1850,7 @@ function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
 // 
 // TASKS TAB
 // 
-function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, areas, addArea, updateArea, moveArea, deleteArea, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
+function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, areas, addArea, updateArea, moveArea, deleteArea, reorderAreas, reorderItems, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
   const [section, setSection] = useState("daily");
   return (
     <div>
@@ -1848,6 +1861,7 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
       {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit} kanbanCards={kanbanCards} goals={goals} links={links}/>}
       {section==="areas"  && <AreasSection isMobile={isMobile} items={kanbanCards} addItem={addKanbanCard} updateItem={updateKanbanCard} deleteItem={deleteKanbanCard}
                                 areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
+                                reorderAreas={reorderAreas} reorderItems={reorderItems}
                                 goals={goals} dailyTasks={dailyTasks} links={links}/>}
       {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} links={links}/>}
     </div>
@@ -2295,13 +2309,20 @@ const periodLabel = (c) => {
 };
 
 // Upcoming last, then overdue first, soonest due, undated (oldest first)
-const sortItems = (list) => [...list].sort((a, b) => {
+const autoOrder = (a, b) => {
   const sa = itemState(a), sb = itemState(b);
   if (sa.upcoming !== sb.upcoming) return sa.upcoming ? 1 : -1;
   const da = sa.upcoming ? a.start_date : sa.due, db = sb.upcoming ? b.start_date : sb.due;
   if (da && db && da !== db) return da.localeCompare(db);
   if (!!da !== !!db) return da ? -1 : 1;
   return (a.created_at || "").localeCompare(b.created_at || "");
+};
+// The order you dragged things into; items never dragged (no position) follow, by due date
+const sortItems = (list) => [...list].sort((a, b) => {
+  const pa = a.position ?? null, pb = b.position ?? null;
+  if (pa !== null && pb !== null) return pa - pb || autoOrder(a, b);
+  if ((pa === null) !== (pb === null)) return pa === null ? 1 : -1;
+  return autoOrder(a, b);
 });
 
 function PlanMenu({ planned, onPlan, isMobile }) {
@@ -2331,7 +2352,7 @@ function PlanMenu({ planned, onPlan, isMobile }) {
   );
 }
 
-function ItemRow({ item, isMobile, goals, plannedToday, onCheck, onUncheck, onPlan, onEdit }) {
+function ItemRow({ item, isMobile, goals, plannedToday, onCheck, onUncheck, onPlan, onEdit, handle, dragging }) {
   const st = itemState(item);
   const { done, due, cad } = st;
   const goal = goals.find(g => g.id === item.goal_id);
@@ -2349,7 +2370,8 @@ function ItemRow({ item, isMobile, goals, plannedToday, onCheck, onUncheck, onPl
   // Recurring items take one check-off per day
   const checkable = !st.upcoming && !st.ended && !(cad === "weekly" && !done && st.doneToday);
   return (
-    <div className={`group flex items-center gap-2.5 px-3 sm:px-4 last:rounded-b-2xl ${isMobile ? "py-3" : "py-2.5"} ${done || st.upcoming ? "bg-slate-50/60" : "hover:bg-slate-50/70"}`}>
+    <div data-row={item.id} className={`group flex items-center gap-1.5 sm:gap-2 pl-1 sm:pl-1.5 pr-3 sm:pr-4 ${isMobile ? "py-3" : "py-2.5"} ${dragging ? "relative z-20 bg-white rounded-xl shadow-lg ring-2 ring-blue-400" : done || st.upcoming ? "bg-slate-50/60" : "hover:bg-slate-50/70"}`}>
+      {handle}
       <button onClick={done ? onUncheck : onCheck} disabled={!checkable && !done} aria-label={done ? "Undo" : "Check off"} title={partial && st.doneToday ? "Checked off today" : undefined}
         className={`${isMobile ? "w-8 h-8" : "w-5 h-5"} rounded-full flex items-center justify-center flex-shrink-0 border-2 transition-all touch-manipulation disabled:cursor-default ${partial && st.doneToday ? "bg-sky-50" : ""} ${done ? "bg-emerald-500 border-emerald-500 text-white" : partial ? "border-sky-400 text-sky-600" : "border-slate-300 text-transparent hover:border-emerald-500 hover:text-emerald-500"}`}>
         {partial ? <span className={`${isMobile ? "text-xs" : "text-[10px]"} font-bold`}>{st.count}</span> : <Check size={isMobile ? 15 : 11} strokeWidth={3}/>}
@@ -2613,7 +2635,7 @@ function QuickAdd({ placeholder, onAdd, onMore }) {
   );
 }
 
-function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, deleteArea, goals, dailyTasks, links }) {
+function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, deleteArea, reorderAreas, reorderItems, goals, dailyTasks, links }) {
   const [filter, setFilter]       = useState("all"); // all | attention
   const [showDone, setShowDone]   = useState(false);
   const [collapsed, setCollapsed] = useState(() => { try { return JSON.parse(localStorage.getItem("mindfit.areas.collapsed") || "[]"); } catch { return []; } });
@@ -2649,10 +2671,165 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
     return filter === "all" || needsAttention(c);
   };
 
+  // Each area has two lists, keyed "<area id or unsorted>|<weekly or other>"
+  const listKind = (c) => isPermanent(c) ? "weekly" : "other";
+  const areaKeyOf = (c) => c.area_id && areas.some(a => a.id === c.area_id) ? c.area_id : "unsorted";
+  const fullList  = (areaKey, kind) => sortItems(items.filter(c => areaKeyOf(c) === areaKey && listKind(c) === kind));
+  const shownList = (areaKey, kind) => fullList(areaKey, kind).filter(visible);
+
+  //  Drag and drop 
+  // Tasks: drag the grip to reorder within a list, or into the same list of another area.
+  // Areas: drag the grip in an area's header; every area folds to its header while one is dragged.
+  // The grip captures the pointer, so moves arrive even when the finger leaves it; the page scrolls near the edges.
+  const [drag, setDrag] = useState(null); // { type: "item", id, kind, from, startIndex, list, index } | { type: "area", id, order }
+  const dragRef = useRef(null);
+  dragRef.current = drag;
+  const pointerY = useRef(0);
+  const startY = useRef(0); // edge scrolling waits until the pointer has actually moved, so grabbing near an edge doesn't scroll
+  const grabOffset = useRef(null); // area drags: where the header was grabbed, to keep it under the finger once areas fold
+  const listEls = useRef({});
+  const areaEls = useRef({});
+
+  const locateItem = (y) => {
+    const d = dragRef.current;
+    let best = null;
+    Object.entries(listEls.current).forEach(([key, el]) => {
+      if (!el || !key.endsWith(`|${d.kind}`)) return;
+      const r = el.getBoundingClientRect();
+      const dist = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (!best || dist < best.dist) best = { key, el, dist };
+    });
+    if (!best) return null;
+    const rows = [...best.el.querySelectorAll("[data-row]")].filter(r => r.dataset.row !== d.id);
+    return { list: best.key, index: rows.filter(r => { const b = r.getBoundingClientRect(); return y > b.top + b.height / 2; }).length };
+  };
+  const locateArea = (y) => {
+    const d = dragRef.current;
+    const rest = d.order.filter(id => id !== d.id);
+    const idx = rest.filter(id => { const r = areaEls.current[id]?.getBoundingClientRect(); return r && y > r.top + r.height / 2; }).length;
+    return [...rest.slice(0, idx), d.id, ...rest.slice(idx)];
+  };
+  const dragMove = (y) => {
+    pointerY.current = y;
+    const d = dragRef.current;
+    if (!d) return;
+    if (d.type === "item") {
+      const at = locateItem(y);
+      if (at && (at.list !== d.list || at.index !== d.index)) setDrag({ ...d, ...at });
+    } else {
+      const order = locateArea(y);
+      if (order.join() !== d.order.join()) setDrag({ ...d, order });
+    }
+  };
+  const moveRef = useRef(dragMove);
+  moveRef.current = dragMove;
+  const endRef = useRef(null);
+
+  // Follow the pointer on the window: a task dropped into another area is re-created there, which ends the grip's pointer capture.
+  // Also scroll the page while a drag sits near the top or bottom edge.
+  useEffect(() => {
+    if (!drag) return;
+    const onMove = (e) => moveRef.current(e.clientY);
+    const onUp = () => endRef.current(true);
+    const onCancel = () => endRef.current(false);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    const t = setInterval(() => {
+      const y = pointerY.current, h = window.innerHeight;
+      if (Math.abs(y - startY.current) < 12) return;
+      startY.current = -1000;
+      const step = y < 90 ? -14 : y > h - (isMobile ? 120 : 70) ? 14 : 0;
+      if (step) { window.scrollBy(0, step); moveRef.current(y); }
+    }, 16);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+  }, [!!drag]);
+
+  // When an area drag folds the page, scroll so the grabbed header stays under the pointer
+  useLayoutEffect(() => {
+    if (drag?.type !== "area" || grabOffset.current === null) return;
+    const el = areaEls.current[drag.id];
+    if (el) window.scrollBy(0, el.getBoundingClientRect().top - (pointerY.current - grabOffset.current));
+    grabOffset.current = null;
+  }, [drag?.type, drag?.id]);
+
+  const startItemDrag = (e, c) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    pointerY.current = startY.current = e.clientY;
+    const kind = listKind(c), from = `${areaKeyOf(c)}|${kind}`;
+    const index = shownList(areaKeyOf(c), kind).findIndex(x => x.id === c.id);
+    setDrag({ type: "item", id: c.id, kind, from, startIndex: index, list: from, index });
+  };
+  const startAreaDrag = (e, area) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    pointerY.current = startY.current = e.clientY;
+    const r = areaEls.current[area.id]?.getBoundingClientRect();
+    grabOffset.current = r ? e.clientY - r.top : 0;
+    setDrag({ type: "area", id: area.id, order: areas.map(a => a.id) });
+  };
+
+  // Places an item at `index` among the visible items of list `key` and renumbers that whole list (hidden items keep their places)
+  const placeItem = (id, key, index) => {
+    const c = items.find(x => x.id === id);
+    if (!c) return;
+    const [areaKey, kind] = key.split("|");
+    const shown = shownList(areaKey, kind).filter(x => x.id !== id);
+    const full  = fullList(areaKey, kind).filter(x => x.id !== id);
+    const at = index > 0 && shown[index - 1] ? full.findIndex(x => x.id === shown[index - 1].id) + 1
+      : shown[index] ? full.findIndex(x => x.id === shown[index].id) : full.length;
+    const next = [...full.slice(0, at), c, ...full.slice(at)];
+    const areaId = areaKey === "unsorted" ? null : areaKey;
+    const updates = next.map((x, i) => {
+      const u = { id: x.id, position: i };
+      if (x.id === id && areaKeyOf(x) !== areaKey) u.area_id = areaId;
+      return u;
+    }).filter(u => "area_id" in u || items.find(x => x.id === u.id)?.position !== u.position);
+    reorderItems(updates);
+  };
+  const endDrag = (save) => {
+    const d = dragRef.current;
+    setDrag(null);
+    if (!save || !d) return;
+    if (d.type === "item") { if (d.list !== d.from || d.index !== d.startIndex) placeItem(d.id, d.list, d.index); }
+    else if (d.order.join() !== areas.map(a => a.id).join()) reorderAreas(d.order);
+  };
+  endRef.current = endDrag;
+  // Arrow keys on a grip move it one place
+  const nudgeItem = (c, delta) => {
+    const key = `${areaKeyOf(c)}|${listKind(c)}`;
+    const shown = shownList(areaKeyOf(c), listKind(c));
+    const i = shown.findIndex(x => x.id === c.id), j = i + delta;
+    if (i >= 0 && j >= 0 && j < shown.length) placeItem(c.id, key, j);
+  };
+  const gripProps = (onStart, onNudge) => ({
+    onPointerDown: (e) => { if (e.button === 0 && !dragRef.current) onStart(e); },
+    onKeyDown: (e) => { if (e.key === "ArrowUp" || e.key === "ArrowDown") { e.preventDefault(); onNudge(e.key === "ArrowUp" ? -1 : 1); } },
+  });
+
+  // What each list shows, with the dragged task lifted out of its list and dropped where it's hovering
+  const draggedItem = drag?.type === "item" ? items.find(c => c.id === drag.id) : null;
+  const displayList = (areaKey, kind) => {
+    let list = shownList(areaKey, kind);
+    if (!draggedItem || drag.kind !== kind) return list;
+    const key = `${areaKey}|${kind}`;
+    list = list.filter(c => c.id !== drag.id);
+    if (drag.list === key) list = [...list.slice(0, drag.index), draggedItem, ...list.slice(drag.index)];
+    // While it hovers over another area, a faded copy holds its old place so the page doesn't jump
+    else if (drag.from === key && drag.startIndex >= 0) list = [...list.slice(0, drag.startIndex), { ...draggedItem, ghost: true }, ...list.slice(drag.startIndex)];
+    return list;
+  };
+  const orderedAreas = drag?.type === "area" ? drag.order.map(id => areas.find(a => a.id === id)).filter(Boolean) : areas;
   const groups = [
-    { key: "unsorted", area: null, items: items.filter(c => !c.area_id || !areas.some(a => a.id === c.area_id)) },
-    ...areas.map(a => ({ key: a.id, area: a, items: items.filter(c => c.area_id === a.id) })),
-  ].filter(g => g.area || g.items.length > 0);
+    { key: "unsorted", area: null, items: items.filter(c => areaKeyOf(c) === "unsorted") },
+    ...orderedAreas.map(a => ({ key: a.id, area: a, items: items.filter(c => c.area_id === a.id) })),
+  ].filter(g => g.area || g.items.length > 0 || (draggedItem && drag.list.startsWith("unsorted|")));
 
   const saveEditor = async (fields) => {
     if (editing.item) await updateItem(editing.item.id, fields);
@@ -2666,12 +2843,35 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
     const fields = itemDoneFields(c, false);
     if (fields) await updateItem(c.id, fields);
   };
-  const row = (c) => (
-    <ItemRow key={c.id} item={c} isMobile={isMobile} goals={goals} plannedToday={plannedToday(c)}
+  const row = (c) => c.ghost ? (
+    <div key={`ghost-${c.id}`} className="opacity-30 pointer-events-none" aria-hidden="true">
+      <ItemRow item={c} isMobile={isMobile} goals={goals} plannedToday={false} handle={<span className={`${isMobile ? "p-1.5" : "p-1"} text-slate-300`}><GripVertical size={isMobile ? 18 : 15}/></span>}/>
+    </div>
+  ) : (
+    <ItemRow key={c.id} item={c} isMobile={isMobile} goals={goals} plannedToday={plannedToday(c)} dragging={drag?.id === c.id}
       onCheck={() => check(c)} onUncheck={() => uncheck(c)}
       onPlan={(iso) => links.planSource({ type: "kanban", cardId: c.id }, c.title, iso)}
-      onEdit={() => setEditing({ item: c })}/>
+      onEdit={() => setEditing({ item: c })}
+      handle={
+        <button aria-label={`Move ${c.title}`} title="Drag to reorder, or into another area"
+          {...gripProps((e) => startItemDrag(e, c), (d) => nudgeItem(c, d))}
+          className={`${isMobile ? "p-1.5" : "p-1"} text-slate-300 hover:text-slate-500 flex-shrink-0 touch-none select-none ${drag?.id === c.id ? "cursor-grabbing text-blue-500" : "cursor-grab"}`}>
+          <GripVertical size={isMobile ? 18 : 15}/>
+        </button>
+      }/>
   );
+  // A list's drop zone; it lights up when a dragged task would move into it. Nothing else on the page changes size
+  // during a drag, so drop targets stay under the pointer (an empty list is found by its quick-add row beside it).
+  const listBox = (areaKey, kind) => {
+    const key = `${areaKey}|${kind}`;
+    const target = draggedItem && drag.kind === kind;
+    return (
+      <div ref={el => { if (el) listEls.current[key] = el; else delete listEls.current[key]; }}
+        className={`divide-y divide-slate-100 transition-colors ${target && drag.list === key && drag.from !== key ? "bg-blue-50/70 rounded-lg" : ""}`}>
+        {displayList(areaKey, kind).map(row)}
+      </div>
+    );
+  };
 
   const stat = (label, value, cls, active, onClick) => (
     <button onClick={onClick} className={`flex-1 min-w-0 text-left rounded-xl px-3 py-2.5 ring-1 ring-inset transition-colors ${active ? "ring-blue-300 bg-blue-50" : "ring-slate-200 bg-white hover:bg-slate-50"}`}>
@@ -2687,7 +2887,7 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
   );
 
   return (
-    <div className="space-y-4">
+    <div className={`space-y-4 ${drag ? "select-none" : ""}`}>
       <div className="flex gap-2">
         {stat("This week", `${weeklyDone}/${weeklyAll.length}`, weeklyAll.length && weeklyDone === weeklyAll.length ? "text-emerald-600" : "text-slate-800", false, () => setFilter("attention"))}
         {stat("Overdue", overdue.length, overdue.length ? "text-rose-600" : "text-slate-300", false, () => setFilter("attention"))}
@@ -2705,6 +2905,7 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
         </label>
         <button onClick={() => setManaging(true)} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg" aria-label="Edit areas" title="Edit areas"><Settings size={16}/></button>
       </div>
+      <p className="text-xs text-slate-400 -mt-2 flex items-center gap-1"><GripVertical size={12}/> Drag the handles to reorder tasks and areas, or to move a task into another area.</p>
 
       {areas.length === 0 && items.length === 0 && (
         <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
@@ -2717,18 +2918,30 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
         const hex = area ? goalHex(area) : "#94a3b8";
         const weekly = list.filter(isPermanent);
         const rest = list.filter(c => !isPermanent(c));
-        const weeklyShown = weekly.filter(visible);
-        const restShown = sortItems(rest.filter(visible));
+        const weeklyShown = displayList(key, "weekly");
+        const restShown = displayList(key, "other");
         const wDone = weekly.filter(c => st(c).done).length;
         const late = rest.filter(c => { const s = st(c); return !s.done && !s.upcoming && s.due && s.due < today; }).length;
-        const isCollapsed = collapsed.includes(key);
-        if (filter === "attention" && weeklyShown.length + restShown.length === 0) return null;
+        const areaDragging = drag?.type === "area";
+        const isCollapsed = areaDragging || collapsed.includes(key);
+        const isDragged = areaDragging && drag.id === area?.id;
+        if (filter === "attention" && !areaDragging && weeklyShown.length + restShown.length === 0) return null;
+        const showWeekly = weekly.length > 0 || (area && filter === "all");
+        const showRest = rest.length > 0 || (area && filter === "all");
         const addWeekly = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "weekly", per_week: 1 });
         const addOther  = (title) => addItem({ title, status: "todo", area_id: area?.id || null, cadence: "once" });
         return (
-          <section key={key} className="bg-white rounded-2xl border border-slate-200 shadow-sm">
-            <div className={`flex items-center gap-2.5 px-4 py-3 rounded-t-2xl ${isCollapsed ? "rounded-b-2xl" : "border-b border-slate-100"}`} style={{ boxShadow: `inset 3px 0 0 ${hex}` }}>
-              <button onClick={() => toggleCollapsed(key)} className="flex-1 min-w-0 flex items-center gap-2.5 text-left" aria-expanded={!isCollapsed}>
+          <section key={key} ref={el => { if (!area) return; if (el) areaEls.current[area.id] = el; else delete areaEls.current[area.id]; }}
+            className={`bg-white rounded-2xl border border-slate-200 shadow-sm transition-shadow ${isDragged ? "relative z-20 shadow-lg ring-2 ring-blue-400" : ""}`}>
+            <div className={`flex items-center gap-2 pl-1.5 pr-4 py-3 rounded-t-2xl ${isCollapsed ? "rounded-b-2xl" : "border-b border-slate-100"}`} style={{ boxShadow: `inset 3px 0 0 ${hex}` }}>
+              {area ? (
+                <button aria-label={`Move the ${area.name} area`} title="Drag to reorder areas"
+                  {...gripProps((e) => startAreaDrag(e, area), (d) => moveArea(area.id, d))}
+                  className={`${isMobile ? "p-1.5" : "p-1"} text-slate-300 hover:text-slate-500 flex-shrink-0 touch-none select-none ${isDragged ? "cursor-grabbing text-blue-500" : "cursor-grab"}`}>
+                  <GripVertical size={isMobile ? 18 : 15}/>
+                </button>
+              ) : <span className={`${isMobile ? "w-[30px]" : "w-[23px]"} flex-shrink-0`}/>}
+              <button onClick={() => !areaDragging && toggleCollapsed(key)} className="flex-1 min-w-0 flex items-center gap-2.5 text-left" aria-expanded={!isCollapsed}>
                 <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: hex }}/>
                 <h3 className="font-semibold text-slate-900 truncate">{area?.name || "Unsorted"}</h3>
                 {weekly.length > 0 && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded-md flex-shrink-0 ${wDone === weekly.length ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{wDone}/{weekly.length} this week</span>}
@@ -2738,18 +2951,18 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
               <button onClick={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "once" } })} className="p-1.5 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg" aria-label={`Add to ${area?.name || "Unsorted"}`}><Plus size={16}/></button>
             </div>
             {!isCollapsed && <div className="pb-1">
-              {(weekly.length > 0 || (area && filter === "all")) && <>
+              {showWeekly && <>
                 {subhead("Every week", `resets Mon · week of ${isoToLabel(weekStart)}`)}
-                <div className="divide-y divide-slate-100">{weeklyShown.map(row)}</div>
-                {weekly.length > 0 && weeklyShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">All done this week.</p>}
+                {listBox(key, "weekly")}
+                {weekly.length > 0 && shownList(key, "weekly").length === 0 && <p className="px-4 py-2 text-sm text-slate-400">All done this week.</p>}
                 {area && filter === "all" && <QuickAdd placeholder="Add a weekly task" onAdd={addWeekly}/>}
               </>}
-              {(rest.length > 0 || (area && filter === "all")) && <>
-                <div className={weekly.length > 0 || (area && filter === "all") ? "border-t border-slate-100 mt-1" : ""}>
+              {showRest && <>
+                <div className={showWeekly ? "border-t border-slate-100 mt-1" : ""}>
                   {subhead("Temporary & one-off")}
                 </div>
-                <div className="divide-y divide-slate-100">{restShown.map(row)}</div>
-                {rest.length > 0 && restShown.length === 0 && <p className="px-4 py-2 text-sm text-slate-400">Nothing due right now.</p>}
+                {listBox(key, "other")}
+                {rest.length > 0 && shownList(key, "other").length === 0 && <p className="px-4 py-2 text-sm text-slate-400">Nothing due right now.</p>}
                 {filter === "all" && <QuickAdd placeholder="Add a one-off task" onAdd={addOther}
                   onMore={() => setEditing({ defaults: { area_id: area?.id || null, cadence: "every", repeat_days: 3, end_date: addDaysISO(today, 14), start_date: today } })}/>}
               </>}
