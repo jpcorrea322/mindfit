@@ -359,16 +359,22 @@ export default function App() {
     await supabase.from("life_areas").update(updates).eq("id", id).eq("user_id", uid());
   };
 
-  // Swaps an area with its neighbour; positions are renumbered so ties can't stick
-  const moveArea = async (id, delta) => {
-    const order = [...areas];
-    const i = order.findIndex(a => a.id === id), j = i + delta;
-    if (i < 0 || j < 0 || j >= order.length) return;
-    [order[i], order[j]] = [order[j], order[i]];
-    const next = order.map((a, k) => ({ ...a, position: k }));
+  // Saves a whole new order of area ids; positions are renumbered so ties can't stick
+  const reorderAreas = async (ids) => {
+    const next = ids.map((id, k) => ({ ...areas.find(a => a.id === id), position: k })).filter(a => a.id);
+    if (next.length !== areas.length) return;
     setAreas(next);
-    await Promise.all(next.filter((a, k) => areas.find(x => x.id === a.id)?.position !== k)
+    await Promise.all(next.filter(a => areas.find(x => x.id === a.id)?.position !== a.position)
       .map(a => supabase.from("life_areas").update({ position: a.position }).eq("id", a.id).eq("user_id", uid())));
+  };
+
+  // Swaps an area with its neighbour
+  const moveArea = (id, delta) => {
+    const ids = areas.map(a => a.id);
+    const i = ids.indexOf(id), j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    return reorderAreas(ids);
   };
 
   // Its items are kept and become unsorted
@@ -538,7 +544,7 @@ export default function App() {
             dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks}
             kanbanCards={items}
             addKanbanCard={addKanbanCard} updateKanbanCard={updateKanbanCard} deleteKanbanCard={deleteKanbanCard}
-            areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
+            areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} reorderAreas={reorderAreas} deleteArea={deleteArea}
             goals={goals}
             addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal}
             habits={habits} addHabit={addHabit} deleteHabit={deleteHabit}
@@ -1837,7 +1843,7 @@ function MoodForm({ entry, moodEntries, onSave, onDelete, onClose }) {
 // 
 // TASKS TAB
 // 
-function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, areas, addArea, updateArea, moveArea, deleteArea, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
+function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanbanCard, updateKanbanCard, deleteKanbanCard, areas, addArea, updateArea, moveArea, reorderAreas, deleteArea, goals, addGoal, updateGoal, deleteGoal, habits, addHabit, deleteHabit, links }) {
   const [section, setSection] = useState("daily");
   return (
     <div>
@@ -1847,7 +1853,7 @@ function TasksTab({ isMobile, dailyTasks, saveDailyTasks, kanbanCards, addKanban
       </div>
       {section==="daily"  && <DailySection  isMobile={isMobile} dailyTasks={dailyTasks} saveDailyTasks={saveDailyTasks} habits={habits} addHabit={addHabit} deleteHabit={deleteHabit} kanbanCards={kanbanCards} goals={goals} links={links}/>}
       {section==="areas"  && <AreasSection isMobile={isMobile} items={kanbanCards} addItem={addKanbanCard} updateItem={updateKanbanCard} deleteItem={deleteKanbanCard}
-                                areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea}
+                                areas={areas} addArea={addArea} updateArea={updateArea} moveArea={moveArea} reorderAreas={reorderAreas} deleteArea={deleteArea}
                                 goals={goals} dailyTasks={dailyTasks} links={links}/>}
       {section==="goals"  && <GoalsSection  goals={goals} addGoal={addGoal} updateGoal={updateGoal} deleteGoal={deleteGoal} kanbanCards={kanbanCards} links={links}/>}
     </div>
@@ -2548,7 +2554,59 @@ function ItemEditor({ item, areas, goals, defaults = {}, onSave, onDelete, onClo
   );
 }
 
-function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, onClose }) {
+// Drag-to-reorder list of areas. Rows follow the finger/mouse while held and the new order is saved on release;
+// the arrows do the same one step at a time for keyboards and fine adjustments.
+function AreaOrderList({ areas, items, isMobile, onReorder, moveArea }) {
+  const [dragId, setDragId] = useState(null);
+  const [order, setOrder]   = useState(null); // area ids in their in-progress order while dragging
+  const rowRefs = useRef({});
+  const shown = order ? order.map(id => areas.find(a => a.id === id)).filter(Boolean) : areas;
+  const start = (e, id) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragId(id);
+    setOrder(areas.map(a => a.id));
+  };
+  const move = (e) => {
+    if (dragId === null || !order) return;
+    const others = order.filter(id => id !== dragId);
+    const idx = others.filter(id => { const r = rowRefs.current[id]?.getBoundingClientRect(); return r && e.clientY > r.top + r.height / 2; }).length;
+    const next = [...others.slice(0, idx), dragId, ...others.slice(idx)];
+    if (next.join() !== order.join()) setOrder(next);
+  };
+  const end = (save) => {
+    if (save && order && order.join() !== areas.map(a => a.id).join()) onReorder(order);
+    setDragId(null);
+    setOrder(null);
+  };
+  return (
+    <div className="space-y-2">
+      {shown.map((a, i) => {
+        const count = items.filter(c => c.area_id === a.id).length;
+        const dragging = dragId === a.id;
+        return (
+          <div key={a.id} ref={el => { rowRefs.current[a.id] = el; }}
+            className={`flex items-center gap-2 bg-white rounded-xl border px-2 ${isMobile ? "py-2.5" : "py-2"} transition-shadow ${dragging ? "border-blue-300 ring-2 ring-blue-400 shadow-lg relative z-10" : "border-slate-200"}`}
+            style={{ boxShadow: dragging ? undefined : `inset 3px 0 0 ${goalHex(a)}` }}>
+            <button aria-label={`Drag ${a.name} to reorder`} title="Drag to reorder"
+              onPointerDown={e => start(e, a.id)} onPointerMove={move}
+              onPointerUp={() => end(true)} onPointerCancel={() => end(false)}
+              className={`p-1.5 text-slate-400 hover:text-slate-700 touch-none select-none flex-shrink-0 ${dragging ? "cursor-grabbing" : "cursor-grab"}`}>
+              <GripVertical size={isMobile ? 20 : 16}/>
+            </button>
+            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: goalHex(a) }}/>
+            <span className="flex-1 min-w-0 truncate font-medium text-slate-800 select-none">{a.name}</span>
+            <span className="text-xs text-slate-400 flex-shrink-0">{count} task{count === 1 ? "" : "s"}</span>
+            <button onClick={() => moveArea(a.id, -1)} disabled={i === 0 || !!dragId} className="p-1.5 text-slate-400 hover:text-slate-700 disabled:opacity-25 flex-shrink-0" aria-label={`Move ${a.name} up`}><ArrowUp size={15}/></button>
+            <button onClick={() => moveArea(a.id, 1)} disabled={i === shown.length - 1 || !!dragId} className="p-1.5 text-slate-400 hover:text-slate-700 disabled:opacity-25 flex-shrink-0" aria-label={`Move ${a.name} down`}><ArrowDown size={15}/></button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function AreaManager({ areas, items, addArea, updateArea, deleteArea, onClose }) {
   const [newName, setNewName] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
   const add = () => {
@@ -2559,17 +2617,13 @@ function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, 
   };
   return (
     <Sheet title="Edit areas" onClose={onClose}>
-      <p className="text-sm text-slate-500 mb-4">These are the fixed parts of your life you want to stay on top of. Rename, recolor or reorder them here.</p>
+      <p className="text-sm text-slate-500 mb-4">These are the fixed parts of your life you want to stay on top of. Rename or recolor them here; use <strong className="text-slate-700">Reorder</strong> on the Areas page to change their order.</p>
       <div className="space-y-2 mb-4">
         {areas.map((a, i) => {
           const count = items.filter(c => c.area_id === a.id).length;
           return (
             <div key={a.id} className="rounded-xl border border-slate-200 p-2.5">
               <div className="flex items-center gap-2">
-                <div className="flex flex-col">
-                  <button onClick={() => moveArea(a.id, -1)} disabled={i === 0} className="p-0.5 text-slate-400 hover:text-slate-700 disabled:opacity-25" aria-label={`Move ${a.name} up`}><ArrowUp size={14}/></button>
-                  <button onClick={() => moveArea(a.id, 1)} disabled={i === areas.length - 1} className="p-0.5 text-slate-400 hover:text-slate-700 disabled:opacity-25" aria-label={`Move ${a.name} down`}><ArrowDown size={14}/></button>
-                </div>
                 <input defaultValue={a.name} onBlur={e => { const v = e.target.value.trim(); if (v && v !== a.name) updateArea(a.id, { name: v }); else e.target.value = a.name; }}
                   onKeyDown={e => e.key === "Enter" && e.currentTarget.blur()}
                   className="flex-1 min-w-0 px-2 py-1.5 border border-transparent hover:border-slate-200 focus:border-blue-400 rounded-lg text-sm font-medium text-slate-800 focus:outline-none"/>
@@ -2580,13 +2634,13 @@ function AreaManager({ areas, items, addArea, updateArea, moveArea, deleteArea, 
                   <button onClick={() => setConfirmDelete(a.id)} className="p-1.5 text-slate-300 hover:text-rose-500 flex-shrink-0" aria-label={`Remove ${a.name}`}><Trash2 size={15}/></button>
                 )}
               </div>
-              <div className="flex gap-1.5 mt-2 ml-7">
+              <div className="flex gap-1.5 mt-2 ml-2">
                 {GOAL_COLORS.map(c => (
                   <button key={c.id} onClick={() => updateArea(a.id, { color: c.id })} title={c.label} aria-label={`${c.label} for ${a.name}`}
                     className={`w-5 h-5 rounded-full transition-transform ${a.color === c.id ? "ring-2 ring-offset-2 ring-slate-700 scale-110" : "hover:scale-110"}`} style={{ background: c.hex }}/>
                 ))}
               </div>
-              {confirmDelete === a.id && <p className="text-xs text-rose-600 mt-2 ml-7">Its {count} task{count === 1 ? "" : "s"} will move to Unsorted. <button onClick={() => setConfirmDelete(null)} className="underline">Keep it</button></p>}
+              {confirmDelete === a.id && <p className="text-xs text-rose-600 mt-2 ml-2">Its {count} task{count === 1 ? "" : "s"} will move to Unsorted. <button onClick={() => setConfirmDelete(null)} className="underline">Keep it</button></p>}
             </div>
           );
         })}
@@ -2613,12 +2667,13 @@ function QuickAdd({ placeholder, onAdd, onMore }) {
   );
 }
 
-function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, deleteArea, goals, dailyTasks, links }) {
+function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas, addArea, updateArea, moveArea, reorderAreas, deleteArea, goals, dailyTasks, links }) {
   const [filter, setFilter]       = useState("all"); // all | attention
   const [showDone, setShowDone]   = useState(false);
   const [collapsed, setCollapsed] = useState(() => { try { return JSON.parse(localStorage.getItem("mindfit.areas.collapsed") || "[]"); } catch { return []; } });
   const [editing, setEditing]     = useState(null); // { item } or { defaults } for a new one
   const [managing, setManaging]   = useState(false);
+  const [reordering, setReordering] = useState(false);
   const today = todayISO();
   const weekStart = weekStartISO(today);
 
@@ -2686,6 +2741,20 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
     </div>
   );
 
+  if (reordering) return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <div className="flex-1 min-w-0">
+          <h3 className="font-semibold text-slate-900">Reorder areas</h3>
+          <p className="text-sm text-slate-500">{isMobile ? "Hold the handle and drag" : "Drag the handle"}, or use the arrows. Changes save as you go.</p>
+        </div>
+        <button onClick={() => setReordering(false)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 flex-shrink-0">Done</button>
+      </div>
+      <AreaOrderList areas={areas} items={items} isMobile={isMobile} onReorder={reorderAreas} moveArea={moveArea}/>
+      {groups.some(g => !g.area) && <p className="text-xs text-slate-400">Unsorted always stays at the top.</p>}
+    </div>
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex gap-2">
@@ -2703,6 +2772,7 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
         <label className="ml-auto flex items-center gap-1.5 text-sm text-slate-500 cursor-pointer select-none">
           <input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)} className="rounded accent-blue-600"/> Finished
         </label>
+        {areas.length > 1 && <button onClick={() => setReordering(true)} className="flex items-center gap-1 px-2.5 py-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg" title="Change the order of your areas"><GripVertical size={15}/> Reorder</button>}
         <button onClick={() => setManaging(true)} className="p-2 text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg" aria-label="Edit areas" title="Edit areas"><Settings size={16}/></button>
       </div>
 
@@ -2763,7 +2833,7 @@ function AreasSection({ isMobile, items, addItem, updateItem, deleteItem, areas,
           onSave={saveEditor} onClose={() => setEditing(null)}
           onDelete={async () => { await deleteItem(editing.item.id); setEditing(null); }}/>
       )}
-      {managing && <AreaManager areas={areas} items={items} addArea={addArea} updateArea={updateArea} moveArea={moveArea} deleteArea={deleteArea} onClose={() => setManaging(false)}/>}
+      {managing && <AreaManager areas={areas} items={items} addArea={addArea} updateArea={updateArea} deleteArea={deleteArea} onClose={() => setManaging(false)}/>}
     </div>
   );
 }
